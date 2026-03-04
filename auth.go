@@ -10,14 +10,18 @@ type authMiddleware struct {
 	userInfo *url.Userinfo
 	digest   *Digest
 
-	next Middleware
+	next ControlConn
 }
 
-func newAuthMiddleware(userInfo *url.Userinfo, next Middleware) *authMiddleware {
+func newAuthMiddleware(userInfo *url.Userinfo, next ControlConn) *authMiddleware {
 	return &authMiddleware{
 		userInfo: userInfo,
 		next:     next,
 	}
+}
+
+func (m *authMiddleware) Open(ctx context.Context) error {
+	return m.next.Open(ctx)
 }
 
 func (m *authMiddleware) DoCall(ctx context.Context, method string, url string, headers map[string]string) (Response, error) {

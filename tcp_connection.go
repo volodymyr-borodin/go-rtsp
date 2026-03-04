@@ -3,37 +3,68 @@ package rtsp
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"github.com/pion/rtp"
 	"io"
+	"net"
+	"sync"
 	"time"
 )
 
-type tcpConn interface {
-	io.ReadWriteCloser
-	SetDeadline(t time.Time) error
+var (
+	ErrConnectionOpened = errors.New("connection already opened")
+	ErrConnectionClosed = errors.New("connection closed")
+)
+
+type dialer interface {
+	DialContext(ctx context.Context, network, address string) (net.Conn, error)
 }
 
 type tcpConnection struct {
-	conn   tcpConn
-	reader *bufio.Reader
+	address string
+	dialer  dialer
+	conn    net.Conn
+
+	mutex sync.Mutex
 
 	rtspResponse    chan callResult
 	rtpHandler      func(pkt *rtp.Packet)
 	rtpErrorHandler func(err error)
 }
 
-func newTcpConnection(conn tcpConn) *tcpConnection {
+func newTcpConnection(address string) *tcpConnection {
+	return newTcpConnectionWithDialer(address, &net.Dialer{})
+}
+
+func newTcpConnectionWithDialer(address string, d dialer) *tcpConnection {
 	c := &tcpConnection{
-		conn:   conn,
-		reader: bufio.NewReader(conn),
+		address: address,
+		dialer:  d,
 
 		rtspResponse: make(chan callResult),
 	}
 
+	return c
+}
+
+func (c *tcpConnection) Open(ctx context.Context) error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	if c.conn != nil {
+		return ErrConnectionOpened
+	}
+
+	conn, err := c.dialer.DialContext(ctx, "tcp", c.address)
+	if err != nil {
+		return err
+	}
+
+	c.conn = conn
 	go c.run()
 
-	return c
+	return err
 }
 
 func (c *tcpConnection) OnRTPPacket(f func(pkt *rtp.Packet)) {
@@ -45,9 +76,13 @@ func (c *tcpConnection) OnRTPError(f func(err error)) {
 }
 
 func (c *tcpConnection) DoCall(ctx context.Context, method string, url string, headers map[string]string) (Response, error) {
+	if c.conn == nil {
+		return Response{}, ErrConnectionClosed
+	}
+
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = c.conn.SetDeadline(deadline)
-		defer func(conn tcpConn) {
+		defer func(conn net.Conn) {
 			_ = conn.SetDeadline(time.Time{})
 		}(c.conn)
 	}
@@ -65,21 +100,37 @@ func (c *tcpConnection) DoCall(ctx context.Context, method string, url string, h
 	}
 }
 
+func (c *tcpConnection) Close() error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	if c.conn == nil {
+		return nil
+	}
+
+	err := c.conn.Close()
+	c.conn = nil
+
+	return err
+}
+
 func (c *tcpConnection) run() {
+	reader := bufio.NewReader(c.conn)
+
 	for {
-		b, err := c.reader.Peek(1)
+		b, err := reader.Peek(1)
 		if err != nil {
 			fmt.Println("Read error:", err)
 			return
 		}
 
 		if b[0] == '$' {
-			_, _ = c.reader.ReadByte() // consume '$'
-			channel, _ := c.reader.ReadByte()
+			_, _ = reader.ReadByte() // consume '$'
+			channel, _ := reader.ReadByte()
 			_ = channel
 
 			lenBytes := make([]byte, 2)
-			_, err := io.ReadFull(c.reader, lenBytes)
+			_, err := io.ReadFull(reader, lenBytes)
 			if err != nil {
 				if c.rtpErrorHandler != nil {
 					c.rtpErrorHandler(err)
@@ -89,7 +140,7 @@ func (c *tcpConnection) run() {
 			length := int(lenBytes[0])<<8 | int(lenBytes[1])
 
 			payload := make([]byte, length)
-			_, err = io.ReadFull(c.reader, payload)
+			_, err = io.ReadFull(reader, payload)
 			if err != nil {
 				if c.rtpErrorHandler != nil {
 					c.rtpErrorHandler(err)
@@ -110,7 +161,7 @@ func (c *tcpConnection) run() {
 				c.rtpHandler(&r)
 			}
 		} else {
-			response, err := readRtspResponse(c.reader)
+			response, err := readRtspResponse(reader)
 			c.rtspResponse <- callResult{
 				r:   response,
 				err: err,
@@ -133,10 +184,6 @@ func (c *tcpConnection) send(method string, url string, headers map[string]strin
 	_, err := c.conn.Write([]byte(req))
 
 	return err
-}
-
-func (c *tcpConnection) Close() error {
-	return c.conn.Close()
 }
 
 type callResult struct {

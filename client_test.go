@@ -115,11 +115,7 @@ func TestClientOptions(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			u, _ := url.Parse(tt.url)
-			c := newClientWithConn(u, tt.conn, ClientConfig{
-				RtpTransportBuilder: func(t transportType) rtpTransport {
-					return tt.conn
-				},
-			})
+			c := newClientWithConn(u, tt.conn, ClientConfig{})
 
 			ctx := context.Background()
 			if tt.timeout != 0 {
@@ -351,11 +347,7 @@ func TestClientDescribe(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			u, _ := url.Parse(tt.url)
-			c := newClientWithConn(u, tt.conn, ClientConfig{
-				RtpTransportBuilder: func(t transportType) rtpTransport {
-					return tt.conn
-				},
-			})
+			c := newClientWithConn(u, tt.conn, ClientConfig{})
 
 			ctx := context.Background()
 			if tt.timeout != 0 {
@@ -557,11 +549,7 @@ func TestClientSetup(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			u, _ := url.Parse(tt.url)
-			c := newClientWithConn(u, tt.conn, ClientConfig{
-				RtpTransportBuilder: func(t transportType) rtpTransport {
-					return tt.conn
-				},
-			})
+			c := newClientWithConn(u, tt.conn, ClientConfig{})
 			s, _ := c.Describe(context.Background())
 
 			ctx := context.Background()
@@ -774,11 +762,7 @@ func TestClientPlay(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			u, _ := url.Parse(tt.url)
-			c := newClientWithConn(u, tt.conn, ClientConfig{
-				RtpTransportBuilder: func(t transportType) rtpTransport {
-					return tt.conn
-				},
-			})
+			c := newClientWithConn(u, tt.conn, ClientConfig{})
 			s, _ := c.Describe(context.Background())
 			if len(s.MediaDescriptions) != 0 {
 				_ = c.Setup(context.Background(), s.MediaDescriptions[0])
@@ -955,11 +939,7 @@ func TestClientTeardown(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			u, _ := url.Parse(tt.url)
-			c := newClientWithConn(u, tt.conn, ClientConfig{
-				RtpTransportBuilder: func(t transportType) rtpTransport {
-					return tt.conn
-				},
-			})
+			c := newClientWithConn(u, tt.conn, ClientConfig{})
 			s, _ := c.Describe(context.Background())
 			_ = c.Setup(context.Background(), s.MediaDescriptions[0])
 
@@ -995,6 +975,7 @@ func TestClientTeardown(t *testing.T) {
 
 type mockTransport struct {
 	sequence []transportSequence
+	opened   bool
 }
 
 func newMockTransport(sequence []transportSequence) *mockTransport {
@@ -1015,6 +996,15 @@ type transportSequence struct {
 
 func (m mockTransport) OnRTPPacket(f func(pkt *rtp.Packet)) {
 
+}
+
+func (m mockTransport) Open(ctx context.Context) error {
+	if m.opened {
+		return ErrConnectionOpened
+	}
+
+	m.opened = true
+	return nil
 }
 
 func (m mockTransport) DoCall(ctx context.Context, method string, url string, headers map[string]string) (Response, error) {
@@ -1042,5 +1032,10 @@ func (m mockTransport) DoCall(ctx context.Context, method string, url string, he
 }
 
 func (m mockTransport) Close() error {
+	if !m.opened {
+		return ErrConnectionClosed
+	}
+
+	m.opened = false
 	return nil
 }

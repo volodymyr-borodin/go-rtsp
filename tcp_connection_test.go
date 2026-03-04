@@ -6,6 +6,7 @@ import (
 	"errors"
 	"github.com/pion/rtp"
 	"io"
+	"net"
 	"reflect"
 	"sync"
 	"testing"
@@ -16,13 +17,13 @@ func TestCallRtsp(t *testing.T) {
 	tests := []struct {
 		name string
 
-		conn            tcpConn
+		conn            net.Conn
 		expectedStatus  int
 		expectedHeaders map[string]string
 	}{
 		{
 			name: "OK response returned",
-			conn: newMockReadWriteCloser(
+			conn: newMockNetConn(
 				[]byte("DESCRIBE rtsp://1.1.1.1:554/stream1 RTSP/1.0\r\nreqh1: reqv1\r\n\r\n"),
 				[]byte("RTSP/1.0 200 OK\r\nresh1: resv1\r\n\r\n")),
 
@@ -31,7 +32,7 @@ func TestCallRtsp(t *testing.T) {
 		},
 		{
 			name: "Bad Request response returned",
-			conn: newMockReadWriteCloser(
+			conn: newMockNetConn(
 				[]byte("DESCRIBE rtsp://1.1.1.1:554/stream1 RTSP/1.0\r\nreqh1: reqv1\r\n\r\n"),
 				[]byte("RTSP/1.0 400 Bad Request\r\nresh1: resv1\r\n\r\n")),
 
@@ -42,7 +43,9 @@ func TestCallRtsp(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			conn := newTcpConnection(tt.conn)
+			conn := newTcpConnectionWithDialer("", newMockNetDialer(tt.conn))
+			_ = conn.Open(context.Background())
+
 			res, err := conn.DoCall(context.Background(), "DESCRIBE", "rtsp://1.1.1.1:554/stream1", map[string]string{
 				"reqh1": "reqv1",
 			})
@@ -78,7 +81,7 @@ func TestOnRTP(t *testing.T) {
 	tests := []struct {
 		name string
 
-		conn              tcpConn
+		conn              net.Conn
 		expectedRTPPacket *rtp.Packet
 		expectedError     error
 	}{
@@ -106,7 +109,8 @@ func TestOnRTP(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			conn := newTcpConnection(tt.conn)
+			conn := newTcpConnectionWithDialer("", newMockNetDialer(tt.conn))
+			_ = conn.Open(context.Background())
 
 			ch := make(chan *rtp.Packet)
 			chErr := make(chan error)
@@ -133,7 +137,23 @@ func TestOnRTP(t *testing.T) {
 	}
 }
 
-type MockReadWriteCloser struct {
+type mockNetDialer struct {
+	f func() net.Conn
+}
+
+func newMockNetDialer(conn net.Conn) *mockNetDialer {
+	return &mockNetDialer{
+		f: func() net.Conn {
+			return conn
+		},
+	}
+}
+
+func (m mockNetDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	return m.f(), nil
+}
+
+type mockNetConn struct {
 	mu sync.Mutex
 
 	// Buffers
@@ -147,8 +167,8 @@ type MockReadWriteCloser struct {
 	closed bool
 }
 
-func newMockReadWriteCloser(expectedWrite, response []byte) *MockReadWriteCloser {
-	return &MockReadWriteCloser{
+func newMockNetConn(expectedWrite, response []byte) *mockNetConn {
+	return &mockNetConn{
 		readBuf:       &bytes.Buffer{},
 		writeBuf:      &bytes.Buffer{},
 		expectedWrite: expectedWrite,
@@ -156,8 +176,8 @@ func newMockReadWriteCloser(expectedWrite, response []byte) *MockReadWriteCloser
 	}
 }
 
-func newMockReadWriteCloserRTP(response []byte) *MockReadWriteCloser {
-	return &MockReadWriteCloser{
+func newMockReadWriteCloserRTP(response []byte) *mockNetConn {
+	return &mockNetConn{
 		readBuf:       bytes.NewBuffer(response),
 		writeBuf:      &bytes.Buffer{},
 		expectedWrite: make([]byte, 0),
@@ -165,7 +185,7 @@ func newMockReadWriteCloserRTP(response []byte) *MockReadWriteCloser {
 	}
 }
 
-func (m *MockReadWriteCloser) Write(p []byte) (int, error) {
+func (m *mockNetConn) Write(p []byte) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -182,7 +202,7 @@ func (m *MockReadWriteCloser) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (m *MockReadWriteCloser) Read(p []byte) (int, error) {
+func (m *mockNetConn) Read(p []byte) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -197,11 +217,29 @@ func (m *MockReadWriteCloser) Read(p []byte) (int, error) {
 	return m.readBuf.Read(p)
 }
 
-func (m *MockReadWriteCloser) SetDeadline(t time.Time) error {
+func (m *mockNetConn) SetDeadline(t time.Time) error {
 	return nil
 }
 
-func (m *MockReadWriteCloser) Close() error {
+func (m *mockNetConn) LocalAddr() net.Addr {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (m *mockNetConn) RemoteAddr() net.Addr {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (m *mockNetConn) SetReadDeadline(t time.Time) error {
+	return nil
+}
+
+func (m *mockNetConn) SetWriteDeadline(t time.Time) error {
+	return nil
+}
+
+func (m *mockNetConn) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

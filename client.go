@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"github.com/pion/rtp"
 	"github.com/pion/sdp/v3"
-	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -57,9 +56,9 @@ const (
 type TransportMode int
 
 const (
-	TransportAuto TransportMode = iota
-	TransportTCP
-	TransportUDP
+	TransportModeAuto TransportMode = iota
+	TransportModeTCP
+	TransportModeUDP
 )
 
 type ClientOption func(*ClientConfig)
@@ -70,10 +69,16 @@ func WithTransport(t TransportMode) ClientOption {
 	}
 }
 
+func WithControlMiddleware(m func(conn ControlConn) ControlConn) ClientOption {
+	return func(c *ClientConfig) {
+		c.ControlMiddlewares = append(c.ControlMiddlewares, m)
+	}
+}
+
 type ClientConfig struct {
 	Transport TransportMode
 
-	RtpTransportBuilder func(t transportType) rtpTransport
+	ControlMiddlewares []func(conn ControlConn) ControlConn
 }
 
 type Client struct {
@@ -82,23 +87,15 @@ type Client struct {
 	state ClientState
 	path  string
 
-	controlConn Middleware
-	session     string
-	cfg         ClientConfig
+	controlConn ControlConn
+	mediaConn   MediaConn
 
-	rtpTransportType    transportType
-	rtpTransport        rtpTransport
-	rtpTransportBuilder rtpTransportBuilder
+	session string
+	cfg     ClientConfig
 
 	mediaPerType           map[uint8]*sdp.MediaDescription
 	onRTPPacket            func(media *sdp.MediaDescription, pkt *rtp.Packet)
 	nextInterleavedChannel int
-}
-
-type rtpTransportBuilder func(t transportType) rtpTransport
-
-type rtpTransport interface {
-	OnRTPPacket(f func(pkt *rtp.Packet))
 }
 
 func NewClient(url *url.URL) (*Client, error) {
@@ -106,45 +103,24 @@ func NewClient(url *url.URL) (*Client, error) {
 }
 
 func NewClientWithOptions(url *url.URL, opts ...ClientOption) (*Client, error) {
-	cfg := ClientConfig{
-		Transport: TransportAuto,
-	}
-
+	cfg := ClientConfig{}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
 
-	conn, err := net.Dial("tcp", url.Host)
-	if err != nil {
-		return nil, err
-	}
-
-	tcpConn := newTcpConnection(conn)
-
-	if cfg.RtpTransportBuilder == nil {
-		cfg.RtpTransportBuilder = func(t transportType) rtpTransport {
-			return tcpConn
-		}
-	}
-
-	return newClientWithConn(url, tcpConn, cfg), nil
+	return newClientWithConn(url, newTcpConnection(url.Host), cfg), nil
 }
 
-func newClientWithConn(url *url.URL, rtspConn Middleware, cfg ClientConfig) *Client {
+func newClientWithConn(url *url.URL, conn conn, cfg ClientConfig) *Client {
 	c := &Client{
 		commandCh: make(chan func(), 3),
 
-		state:               ClientStateInit,
-		path:                fmt.Sprintf("%s://%s%s", url.Scheme, url.Host, url.Path),
-		controlConn:         newAuthMiddleware(url.User, newSeqMiddleware(rtspConn)),
-		rtpTransportType:    transportUDP,
-		rtpTransportBuilder: cfg.RtpTransportBuilder,
+		state:       ClientStateInit,
+		path:        fmt.Sprintf("%s://%s%s", url.Scheme, url.Host, url.Path),
+		controlConn: newControlConn(conn, url.User, cfg.ControlMiddlewares),
+		mediaConn:   newMediaConn(conn, cfg),
 
 		onRTPPacket: func(media *sdp.MediaDescription, pkt *rtp.Packet) {},
-	}
-
-	if cfg.Transport == TransportTCP {
-		c.rtpTransportType = transportTCP
 	}
 
 	go c.run()
@@ -168,8 +144,13 @@ func (c *Client) Options(ctx context.Context) ([]string, error) {
 	resCh := make(chan optionsResponse)
 
 	c.commandCh <- func() {
-		res, err := c.controlConn.DoCall(ctx, string(MethodOptions), "*", make(map[string]string))
+		err := c.ensureControlConnReady(ctx)
+		if err != nil {
+			resCh <- optionsResponse{err: err}
+			return
+		}
 
+		res, err := c.controlConn.DoCall(ctx, string(MethodOptions), "*", make(map[string]string))
 		if err != nil {
 			resCh <- optionsResponse{err: err}
 			return
@@ -208,6 +189,12 @@ func (c *Client) Describe(ctx context.Context) (sdp.SessionDescription, error) {
 		newState, ok := c.transitionAllowed(MethodDescribe)
 		if !ok {
 			resCh <- describeResponse{err: ErrInvalidClientState}
+			return
+		}
+
+		err := c.ensureControlConnReady(ctx)
+		if err != nil {
+			resCh <- describeResponse{err: err}
 			return
 		}
 
@@ -273,6 +260,12 @@ func (c *Client) Setup(ctx context.Context, media *sdp.MediaDescription) error {
 			return
 		}
 
+		err := c.ensureControlConnReady(ctx)
+		if err != nil {
+			resCh <- err
+			return
+		}
+
 		control, ok := media.Attribute("control")
 		if !ok {
 			resCh <- fmt.Errorf("%w: %s", ErrMalformedRequest, "no control attribute")
@@ -334,7 +327,12 @@ func (c *Client) Play(ctx context.Context) error {
 			return
 		}
 
-		c.rtpTransport = c.rtpTransportBuilder(c.rtpTransportType)
+		err := c.ensureControlConnReady(ctx)
+		if err != nil {
+			resCh <- err
+			return
+		}
+
 		res, err := c.controlConn.DoCall(ctx, string(MethodPlay), c.path, map[string]string{
 			HeaderSession: c.session,
 		})
@@ -380,12 +378,15 @@ func (c *Client) Teardown(ctx context.Context) error {
 			HeaderSession: c.session,
 		})
 
-		c.rtpTransport = nil
 		c.session = ""
 		c.nextInterleavedChannel = 0
 		c.state = newState
 
-		errCh <- c.controlConn.Close()
+		if err := c.controlConn.Close(); !errors.Is(err, ErrConnectionClosed) {
+			errCh <- err
+		} else {
+			errCh <- nil
+		}
 	}
 
 	select {
@@ -394,6 +395,14 @@ func (c *Client) Teardown(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (c *Client) ensureControlConnReady(ctx context.Context) error {
+	if err := c.controlConn.Open(ctx); !errors.Is(err, ErrConnectionOpened) {
+		return err
+	}
+
+	return nil
 }
 
 func (c *Client) transitionAllowed(method method) (ClientState, bool) {
@@ -444,21 +453,55 @@ func sanitizeSDPOrigin(sdp []byte) []byte {
 	return bytes.Join(lines, []byte("\n"))
 }
 
-type Middleware interface {
+type conn interface {
+	MediaConn
+	ControlConn
+}
+
+type MediaConn interface {
+	OnRTPPacket(f func(pkt *rtp.Packet))
+}
+
+func newMediaConn(conn conn, cfg ClientConfig) MediaConn {
+	return conn
+}
+
+type ControlConn interface {
+	Open(ctx context.Context) error
 	DoCall(ctx context.Context, method string, url string, headers map[string]string) (Response, error)
 	Close() error
+}
+
+func newControlConn(conn conn, user *url.Userinfo, middlewares []func(conn ControlConn) ControlConn) ControlConn {
+	controlConn := conn.(ControlConn)
+
+	controlConn = newSeqMiddleware(controlConn)
+
+	if user != nil {
+		controlConn = newAuthMiddleware(user, controlConn)
+	}
+
+	for _, c := range middlewares {
+		controlConn = c(controlConn)
+	}
+
+	return controlConn
 }
 
 type cseqMiddleware struct {
 	cseq int
 
-	next Middleware
+	next ControlConn
 }
 
-func newSeqMiddleware(next Middleware) *cseqMiddleware {
+func newSeqMiddleware(next ControlConn) *cseqMiddleware {
 	return &cseqMiddleware{
 		next: next,
 	}
+}
+
+func (m *cseqMiddleware) Open(ctx context.Context) error {
+	return m.next.Open(ctx)
 }
 
 func (m *cseqMiddleware) DoCall(ctx context.Context, method string, url string, headers map[string]string) (Response, error) {
