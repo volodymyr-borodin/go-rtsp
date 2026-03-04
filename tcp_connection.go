@@ -13,8 +13,9 @@ import (
 )
 
 var (
-	ErrConnectionOpened = errors.New("connection already opened")
-	ErrConnectionClosed = errors.New("connection closed")
+	ErrConnectionOpened   = errors.New("connection already opened")
+	ErrConnectionClosed   = errors.New("connection closed")
+	ErrMediaAlreadyExists = errors.New("media already exists")
 )
 
 type dialer interface {
@@ -31,6 +32,8 @@ type tcpConnection struct {
 	rtspResponse    chan callResult
 	rtpHandler      func(pkt *rtp.Packet)
 	rtpErrorHandler func(err error)
+
+	mediaChannel map[int]int
 }
 
 func newTcpConnection(address string) *tcpConnection {
@@ -43,6 +46,8 @@ func newTcpConnectionWithDialer(address string, d dialer) *tcpConnection {
 		dialer:  d,
 
 		rtspResponse: make(chan callResult),
+
+		mediaChannel: make(map[int]int),
 	}
 
 	return c
@@ -62,9 +67,27 @@ func (c *tcpConnection) Open(ctx context.Context) error {
 	}
 
 	c.conn = conn
+
 	go c.run()
 
 	return err
+}
+
+func (c *tcpConnection) OpenMedia(mediaType int, ctx context.Context) (string, error) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	if c.conn == nil {
+		return "", ErrConnectionClosed
+	}
+
+	if _, ok := c.mediaChannel[mediaType]; ok {
+		return "", ErrMediaAlreadyExists
+	}
+
+	c.mediaChannel[mediaType] = len(c.mediaChannel) * 2
+
+	return fmt.Sprintf("RTP/AVP/TCP;unicast;interleaved=%d-%d", c.mediaChannel[mediaType], c.mediaChannel[mediaType]+1), nil
 }
 
 func (c *tcpConnection) OnRTPPacket(f func(pkt *rtp.Packet)) {
@@ -120,7 +143,6 @@ func (c *tcpConnection) run() {
 	for {
 		b, err := reader.Peek(1)
 		if err != nil {
-			fmt.Println("Read error:", err)
 			return
 		}
 

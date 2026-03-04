@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/pion/rtp"
 	"github.com/pion/sdp/v3"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -118,7 +119,7 @@ func newClientWithConn(url *url.URL, conn conn, cfg ClientConfig) *Client {
 		state:       ClientStateInit,
 		path:        fmt.Sprintf("%s://%s%s", url.Scheme, url.Host, url.Path),
 		controlConn: newControlConn(conn, url.User, cfg.ControlMiddlewares),
-		mediaConn:   newMediaConn(conn, cfg),
+		mediaConn:   newMediaConn(url, conn, cfg),
 
 		onRTPPacket: func(media *sdp.MediaDescription, pkt *rtp.Packet) {},
 	}
@@ -276,9 +277,36 @@ func (c *Client) Setup(ctx context.Context, media *sdp.MediaDescription) error {
 			control, _ = url.JoinPath(c.path, control)
 		}
 
-		setupHeaders := map[string]string{
-			HeaderTransport: strings.Join(media.MediaName.Protos, "/") + fmt.Sprintf("/TCP;unicast;interleaved=%d-%d", c.nextInterleavedChannel*2, c.nextInterleavedChannel*2+1),
+		if len(media.MediaName.Formats) < 1 {
+			resCh <- fmt.Errorf("%w: no formats specified for %s", ErrMalformedRequest, media.MediaName.String())
+			return
 		}
+
+		format := media.MediaName.Formats[0]
+		mediaType, err := strconv.Atoi(format)
+		if err != nil {
+			resCh <- fmt.Errorf("%w: invalid format %s", ErrMalformedRequest, media.MediaName.String())
+			return
+		}
+
+		transport, err := c.mediaConn.OpenMedia(mediaType, ctx)
+		if err != nil {
+			resCh <- err
+			return
+		}
+
+		c.mediaConn.OnRTPPacket(func(pkt *rtp.Packet) {
+			if c.onRTPPacket != nil {
+				if media, ok := c.mediaPerType[pkt.PayloadType]; ok {
+					c.onRTPPacket(media, pkt)
+				}
+			}
+		})
+
+		setupHeaders := map[string]string{
+			HeaderTransport: transport,
+		}
+
 		if c.session != "" {
 			setupHeaders[HeaderSession] = c.session
 		}
@@ -459,11 +487,17 @@ type conn interface {
 }
 
 type MediaConn interface {
+	OpenMedia(mediaType int, ctx context.Context) (transport string, err error)
 	OnRTPPacket(f func(pkt *rtp.Packet))
+	Close() error
 }
 
-func newMediaConn(conn conn, cfg ClientConfig) MediaConn {
-	return conn
+func newMediaConn(url *url.URL, conn conn, cfg ClientConfig) MediaConn {
+	if cfg.Transport == TransportModeTCP {
+		return conn
+	}
+
+	return newUdpPull(net.ParseIP(url.Host))
 }
 
 type ControlConn interface {
