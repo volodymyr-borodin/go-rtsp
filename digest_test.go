@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestParseDigest(t *testing.T) {
+func TestDigestParse(t *testing.T) {
 	tests := []struct {
 		name   string
 		header string
@@ -30,13 +30,13 @@ func TestParseDigest(t *testing.T) {
 			name:          "invalid format",
 			header:        `Digest realm="bad`,
 			expected:      Digest{},
-			expectedError: MalformedDigestHeader,
+			expectedError: ErrMalformedDigestHeader,
 		},
 		{
 			name:          "no prefix",
 			header:        `realm="testrealm", nonce="abc123"`,
 			expected:      Digest{},
-			expectedError: MalformedDigestHeader,
+			expectedError: ErrMalformedDigestHeader,
 		},
 		{
 			name:   "extra spaces",
@@ -65,37 +65,37 @@ func TestParseDigest(t *testing.T) {
 		{
 			name:          "duplicate key",
 			header:        `Digest realm="a", realm="b", nonce="abc"`,
-			expectedError: MalformedDigestHeader,
+			expectedError: ErrMalformedDigestHeader,
 		},
 		{
 			name:          "missing value",
 			header:        `Digest realm=, nonce="abc"`,
-			expectedError: MalformedDigestHeader,
+			expectedError: ErrMalformedDigestHeader,
 		},
 		{
 			name:          "missing equals",
 			header:        `Digest realm "abc"`,
-			expectedError: MalformedDigestHeader,
+			expectedError: ErrMalformedDigestHeader,
 		},
 		{
 			name:          "trailing garbage",
 			header:        `Digest realm="a", nonce="b" garbage`,
-			expectedError: MalformedDigestHeader,
+			expectedError: ErrMalformedDigestHeader,
 		},
 		{
 			name:          "empty key",
 			header:        `Digest ="value"`,
-			expectedError: MalformedDigestHeader,
+			expectedError: ErrMalformedDigestHeader,
 		},
 		{
 			name:          "empty",
 			header:        "",
-			expectedError: MalformedDigestHeader,
+			expectedError: ErrMalformedDigestHeader,
 		},
 		{
 			name:          "only scheme",
 			header:        "Digest",
-			expectedError: MalformedDigestHeader,
+			expectedError: ErrMalformedDigestHeader,
 		},
 	}
 
@@ -122,7 +122,7 @@ func TestParseDigest(t *testing.T) {
 	}
 }
 
-func TestBuildHeader(t *testing.T) {
+func TestDigestBuildHeader(t *testing.T) {
 	tests := []struct {
 		name     string
 		digest   Digest

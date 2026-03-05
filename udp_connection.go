@@ -5,7 +5,6 @@ import (
 	"errors"
 	"github.com/pion/rtp"
 	"net"
-	"sync"
 )
 
 type udpConnection struct {
@@ -15,10 +14,8 @@ type udpConnection struct {
 	rtpConn  *net.UDPConn
 	rtcpConn *net.UDPConn
 
-	mutex sync.Mutex
-
-	rtpHandler      func(pkt *rtp.Packet)
-	rtpErrorHandler func(err error)
+	onRTPPackage func(pkt *rtp.Packet)
+	onRTPError   func(err error)
 }
 
 func newUdpConnection(ip net.IP) *udpConnection {
@@ -33,9 +30,6 @@ func newUdpConnectionWithDialer(ip net.IP, binder udpBinder) *udpConnection {
 }
 
 func (c *udpConnection) Open(ctx context.Context) error {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
 	rtpConn, rtcpConn, err := c.allocateRTPRTCPPair()
 	if err != nil {
 		return err
@@ -46,7 +40,7 @@ func (c *udpConnection) Open(ctx context.Context) error {
 
 	go c.readRTP()
 
-	return err
+	return nil
 }
 
 func (c *udpConnection) RTPPort() int {
@@ -86,13 +80,14 @@ func (c *udpConnection) allocateRTPRTCPPair() (rtpConn *net.UDPConn, rtcpConn *n
 }
 
 func (c *udpConnection) OnRTPPacket(f func(pkt *rtp.Packet)) {
-	c.rtpHandler = f
+	c.onRTPPackage = f
+}
+
+func (c *udpConnection) OnRTPError(f func(err error)) {
+	c.onRTPError = f
 }
 
 func (c *udpConnection) Close() error {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
 	var rtpErr error
 	if c.rtpConn != nil {
 		rtpErr = c.rtpConn.Close()
@@ -114,23 +109,17 @@ func (c *udpConnection) readRTP() {
 	for {
 		n, _, err := c.rtpConn.ReadFromUDP(buf)
 		if err != nil {
-			if c.rtpErrorHandler != nil {
-				c.rtpErrorHandler(err)
-			}
+			c.onRTPError(err)
 			return
 		}
 
 		var pkt rtp.Packet
 		if err := pkt.Unmarshal(buf[:n]); err != nil {
-			if c.rtpErrorHandler != nil {
-				c.rtpErrorHandler(err)
-			}
+			c.onRTPError(err)
 			continue
 		}
 
-		if c.rtpHandler != nil {
-			c.rtpHandler(&pkt)
-		}
+		c.onRTPPackage(&pkt)
 	}
 }
 

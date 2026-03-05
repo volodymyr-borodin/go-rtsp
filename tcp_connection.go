@@ -27,13 +27,14 @@ type tcpConnection struct {
 	dialer  dialer
 	conn    net.Conn
 
-	mutex sync.Mutex
+	done   chan struct{}
+	doneWG sync.WaitGroup
 
-	rtspResponse    chan callResult
-	rtpHandler      func(pkt *rtp.Packet)
-	rtpErrorHandler func(err error)
+	rtspResponse chan callResult
 
-	mediaChannel map[int]int
+	mediaChannel        map[string]int
+	channelOnRTPPackage map[int]func(pkt *rtp.Packet)
+	channelOnRTPError   map[int]func(err error)
 }
 
 func newTcpConnection(address string) *tcpConnection {
@@ -45,18 +46,19 @@ func newTcpConnectionWithDialer(address string, d dialer) *tcpConnection {
 		address: address,
 		dialer:  d,
 
+		done: make(chan struct{}),
+
 		rtspResponse: make(chan callResult),
 
-		mediaChannel: make(map[int]int),
+		mediaChannel:        make(map[string]int),
+		channelOnRTPPackage: make(map[int]func(pkt *rtp.Packet)),
+		channelOnRTPError:   make(map[int]func(err error)),
 	}
 
 	return c
 }
 
 func (c *tcpConnection) Open(ctx context.Context) error {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
 	if c.conn != nil {
 		return ErrConnectionOpened
 	}
@@ -68,15 +70,13 @@ func (c *tcpConnection) Open(ctx context.Context) error {
 
 	c.conn = conn
 
+	c.doneWG.Add(1)
 	go c.run()
 
-	return err
+	return nil
 }
 
-func (c *tcpConnection) OpenMedia(mediaType int, ctx context.Context) (string, error) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
+func (c *tcpConnection) OpenMedia(ctx context.Context, mediaType string, onRTPPackage func(pkt *rtp.Packet), onRTPError func(err error)) (string, error) {
 	if c.conn == nil {
 		return "", ErrConnectionClosed
 	}
@@ -86,21 +86,15 @@ func (c *tcpConnection) OpenMedia(mediaType int, ctx context.Context) (string, e
 	}
 
 	c.mediaChannel[mediaType] = len(c.mediaChannel) * 2
+	c.channelOnRTPPackage[c.mediaChannel[mediaType]] = onRTPPackage
+	c.channelOnRTPError[c.mediaChannel[mediaType]] = onRTPError
 
 	return fmt.Sprintf("RTP/AVP/TCP;unicast;interleaved=%d-%d", c.mediaChannel[mediaType], c.mediaChannel[mediaType]+1), nil
 }
 
-func (c *tcpConnection) OnRTPPacket(f func(pkt *rtp.Packet)) {
-	c.rtpHandler = f
-}
-
-func (c *tcpConnection) OnRTPError(f func(err error)) {
-	c.rtpErrorHandler = f
-}
-
-func (c *tcpConnection) DoCall(ctx context.Context, method string, url string, headers map[string]string) (Response, error) {
+func (c *tcpConnection) DoCall(ctx context.Context, method string, url string, headers map[string]string) (response, error) {
 	if c.conn == nil {
-		return Response{}, ErrConnectionClosed
+		return response{}, ErrConnectionClosed
 	}
 
 	if deadline, ok := ctx.Deadline(); ok {
@@ -112,35 +106,42 @@ func (c *tcpConnection) DoCall(ctx context.Context, method string, url string, h
 
 	err := c.send(method, url, headers)
 	if err != nil {
-		return Response{}, err
+		return response{}, err
 	}
 
 	select {
 	case <-ctx.Done():
-		return Response{}, ctx.Err()
+		return response{}, ctx.Err()
 	case res := <-c.rtspResponse:
 		return res.r, res.err
 	}
 }
 
 func (c *tcpConnection) Close() error {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
 	if c.conn == nil {
 		return nil
 	}
 
-	err := c.conn.Close()
-	c.conn = nil
+	close(c.done)
+	c.doneWG.Wait()
 
-	return err
+	return nil
 }
 
 func (c *tcpConnection) run() {
+	defer c.doneWG.Done()
 	reader := bufio.NewReader(c.conn)
 
 	for {
+		select {
+		case <-c.done:
+			_ = c.conn.Close()
+			c.conn = nil
+
+			return
+		default:
+		}
+
 		b, err := reader.Peek(1)
 		if err != nil {
 			return
@@ -149,39 +150,37 @@ func (c *tcpConnection) run() {
 		if b[0] == '$' {
 			_, _ = reader.ReadByte() // consume '$'
 			channel, _ := reader.ReadByte()
-			_ = channel
 
 			lenBytes := make([]byte, 2)
 			_, err := io.ReadFull(reader, lenBytes)
 			if err != nil {
-				if c.rtpErrorHandler != nil {
-					c.rtpErrorHandler(err)
-					continue
-				}
+				c.channelOnRTPError[int(channel)](err)
+
+				continue
 			}
 			length := int(lenBytes[0])<<8 | int(lenBytes[1])
 
 			payload := make([]byte, length)
 			_, err = io.ReadFull(reader, payload)
+
+			if channel%2 == 1 {
+				// skip RTCP packets for now
+				continue
+			}
+
 			if err != nil {
-				if c.rtpErrorHandler != nil {
-					c.rtpErrorHandler(err)
-					continue
-				}
+				c.channelOnRTPError[int(channel)](err)
+				continue
 			}
 
 			var r rtp.Packet
 			err = r.Unmarshal(payload)
 			if err != nil {
-				if c.rtpErrorHandler != nil {
-					c.rtpErrorHandler(err)
-					continue
-				}
+				c.channelOnRTPError[int(channel)](err)
+				continue
 			}
 
-			if c.rtpHandler != nil {
-				c.rtpHandler(&r)
-			}
+			c.channelOnRTPPackage[int(channel)](&r)
 		} else {
 			response, err := readRtspResponse(reader)
 			c.rtspResponse <- callResult{
@@ -209,6 +208,6 @@ func (c *tcpConnection) send(method string, url string, headers map[string]strin
 }
 
 type callResult struct {
-	r   Response
+	r   response
 	err error
 }

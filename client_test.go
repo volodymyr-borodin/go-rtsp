@@ -3,6 +3,7 @@ package rtsp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/pion/rtp"
 	"github.com/pion/sdp/v3"
 
@@ -12,6 +13,9 @@ import (
 	"testing"
 	"time"
 )
+
+var transportOpenError = errors.New("mock error")
+var callError = errors.New("mock error")
 
 func TestClientOptions(t *testing.T) {
 	tests := []struct {
@@ -25,7 +29,7 @@ func TestClientOptions(t *testing.T) {
 		expectedError   error
 	}{
 		{
-			name: "passes successfully",
+			name: "OK",
 
 			url: "rtsp://u1:p1@127.0.0.1:554/stream1",
 			conn: newMockTransport([]transportSequence{
@@ -35,7 +39,7 @@ func TestClientOptions(t *testing.T) {
 					headers: map[string]string{
 						HeaderCSeq: "0",
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 						Headers: map[string]string{
 							HeaderPublic: "OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN",
@@ -47,7 +51,7 @@ func TestClientOptions(t *testing.T) {
 			expectedMethods: []string{"OPTIONS", "DESCRIBE", "SETUP", "PLAY", "TEARDOWN"},
 		},
 		{
-			name: "status not ok",
+			name: "OK public header missing",
 
 			url: "rtsp://u1:p1@127.0.0.1:554/stream1",
 			conn: newMockTransport([]transportSequence{
@@ -57,26 +61,7 @@ func TestClientOptions(t *testing.T) {
 					headers: map[string]string{
 						HeaderCSeq: "0",
 					},
-					resp: Response{
-						StatusCode: 400,
-					},
-				},
-			}),
-
-			expectedError: ErrRequestFailed,
-		},
-		{
-			name: "no public header",
-
-			url: "rtsp://u1:p1@127.0.0.1:554/stream1",
-			conn: newMockTransport([]transportSequence{
-				{
-					method: "OPTIONS",
-					url:    "*",
-					headers: map[string]string{
-						HeaderCSeq: "0",
-					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 						Headers:    map[string]string{},
 					},
@@ -86,7 +71,7 @@ func TestClientOptions(t *testing.T) {
 			expectedError: ErrMalformedResponse,
 		},
 		{
-			name: "request stuck",
+			name: "BAD REQUEST",
 
 			url: "rtsp://u1:p1@127.0.0.1:554/stream1",
 			conn: newMockTransport([]transportSequence{
@@ -96,7 +81,34 @@ func TestClientOptions(t *testing.T) {
 					headers: map[string]string{
 						HeaderCSeq: "0",
 					},
-					resp: Response{
+					resp: response{
+						StatusCode: 400,
+					},
+				},
+			}),
+
+			expectedError: ErrRequestFailed,
+		},
+		{
+			name: "connection failed",
+
+			url:  "rtsp://u1:p1@127.0.0.1:554/stream1",
+			conn: newOpenErrorTransport(),
+
+			expectedError: transportOpenError,
+		},
+		{
+			name: "call timout",
+
+			url: "rtsp://u1:p1@127.0.0.1:554/stream1",
+			conn: newMockTransport([]transportSequence{
+				{
+					method: "OPTIONS",
+					url:    "*",
+					headers: map[string]string{
+						HeaderCSeq: "0",
+					},
+					resp: response{
 						StatusCode: 200,
 						Headers: map[string]string{
 							HeaderPublic: "OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN",
@@ -110,12 +122,29 @@ func TestClientOptions(t *testing.T) {
 			timeout:       100 * time.Millisecond,
 			expectedError: context.DeadlineExceeded,
 		},
+		{
+			name: "call failed",
+
+			url: "rtsp://u1:p1@127.0.0.1:554/stream1",
+			conn: newMockTransport([]transportSequence{
+				{
+					method: "OPTIONS",
+					url:    "*",
+					headers: map[string]string{
+						HeaderCSeq: "0",
+					},
+					err: callError,
+				},
+			}),
+
+			expectedError: callError,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			u, _ := url.Parse(tt.url)
-			c := newClientWithConn(u, tt.conn, ClientConfig{})
+			c := newClientWithConn(u, tt.conn, ClientConfig{Transport: TransportModeTCP})
 
 			ctx := context.Background()
 			if tt.timeout != 0 {
@@ -154,7 +183,7 @@ func TestClientDescribe(t *testing.T) {
 		expectedError error
 	}{
 		{
-			name: "passes successfully",
+			name: "OK",
 
 			url: "rtsp://u1:p1@127.0.0.1:554/stream1",
 			conn: newMockTransport([]transportSequence{
@@ -165,7 +194,7 @@ func TestClientDescribe(t *testing.T) {
 						HeaderCSeq:   "0",
 						HeaderAccept: ContentTypeSDP,
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 						Headers:    make(map[string]string),
 						Body:       []byte("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=-\nt=0 0\nm=video 0 RTP/AVP 96\na=rtpmap:96 H264/90000\n"),
@@ -183,7 +212,7 @@ func TestClientDescribe(t *testing.T) {
 			},
 		},
 		{
-			name: "unauthorized retried successfully",
+			name: "BAD REQUEST",
 
 			url: "rtsp://u1:p1@127.0.0.1:554/stream1",
 			conn: newMockTransport([]transportSequence{
@@ -194,7 +223,29 @@ func TestClientDescribe(t *testing.T) {
 						HeaderCSeq:   "0",
 						HeaderAccept: ContentTypeSDP,
 					},
-					resp: Response{
+					resp: response{
+						StatusCode: 400,
+						Headers:    make(map[string]string),
+					},
+				},
+			}),
+
+			expectedMedia: []*sdp.MediaDescription{},
+			expectedError: ErrRequestFailed,
+		},
+		{
+			name: "UNAUTHORIZED retried",
+
+			url: "rtsp://u1:p1@127.0.0.1:554/stream1",
+			conn: newMockTransport([]transportSequence{
+				{
+					method: "DESCRIBE",
+					url:    "rtsp://127.0.0.1:554/stream1",
+					headers: map[string]string{
+						HeaderCSeq:   "0",
+						HeaderAccept: ContentTypeSDP,
+					},
+					resp: response{
 						StatusCode: 401,
 						Headers: map[string]string{
 							HeaderWWWAuthenticate: `Digest realm="testrealm", nonce="abc123"`,
@@ -209,7 +260,7 @@ func TestClientDescribe(t *testing.T) {
 						HeaderAccept:        ContentTypeSDP,
 						HeaderAuthorization: `Digest username="u1", realm="testrealm", nonce="abc123", uri="rtsp://127.0.0.1:554/stream1", response="06bf5e30d0c480cf51129e2a82462f86"`,
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 						Headers:    make(map[string]string),
 						Body:       []byte("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=-\nt=0 0\nm=video 0 RTP/AVP 96\na=rtpmap:96 H264/90000\n"),
@@ -227,7 +278,7 @@ func TestClientDescribe(t *testing.T) {
 			},
 		},
 		{
-			name: "returns bad request",
+			name: "SDP corrupted",
 
 			url: "rtsp://u1:p1@127.0.0.1:554/stream1",
 			conn: newMockTransport([]transportSequence{
@@ -238,75 +289,7 @@ func TestClientDescribe(t *testing.T) {
 						HeaderCSeq:   "0",
 						HeaderAccept: ContentTypeSDP,
 					},
-					resp: Response{
-						StatusCode: 400,
-						Headers:    make(map[string]string),
-					},
-				},
-			}),
-
-			expectedMedia: []*sdp.MediaDescription{},
-			expectedError: ErrRequestFailed,
-		},
-		{
-			name: "no media formats provided",
-
-			url: "rtsp://u1:p1@127.0.0.1:554/stream1",
-			conn: newMockTransport([]transportSequence{
-				{
-					method: "DESCRIBE",
-					url:    "rtsp://127.0.0.1:554/stream1",
-					headers: map[string]string{
-						HeaderCSeq:   "0",
-						HeaderAccept: ContentTypeSDP,
-					},
-					resp: Response{
-						StatusCode: 200,
-						Headers:    make(map[string]string),
-						Body:       []byte("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=-\nt=0 0\nm=video 0 RTP/AVP\n"),
-					},
-				},
-			}),
-
-			expectedMedia: []*sdp.MediaDescription{},
-			expectedError: ErrMalformedResponse,
-		},
-		{
-			name: "malformed format",
-
-			url: "rtsp://u1:p1@127.0.0.1:554/stream1",
-			conn: newMockTransport([]transportSequence{
-				{
-					method: "DESCRIBE",
-					url:    "rtsp://127.0.0.1:554/stream1",
-					headers: map[string]string{
-						HeaderCSeq:   "0",
-						HeaderAccept: ContentTypeSDP,
-					},
-					resp: Response{
-						StatusCode: 200,
-						Headers:    make(map[string]string),
-						Body:       []byte("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=-\nt=0 0\nm=video 0 RTP/AVP NOT_A_NUMBER\na=rtpmap:96 H264/90000\n"),
-					},
-				},
-			}),
-
-			expectedMedia: []*sdp.MediaDescription{},
-			expectedError: ErrMalformedResponse,
-		},
-		{
-			name: "non SDP response body",
-
-			url: "rtsp://u1:p1@127.0.0.1:554/stream1",
-			conn: newMockTransport([]transportSequence{
-				{
-					method: "DESCRIBE",
-					url:    "rtsp://127.0.0.1:554/stream1",
-					headers: map[string]string{
-						HeaderCSeq:   "0",
-						HeaderAccept: ContentTypeSDP,
-					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 						Headers:    make(map[string]string),
 						Body:       []byte("NON_SDP RESPONSE\n"),
@@ -318,7 +301,15 @@ func TestClientDescribe(t *testing.T) {
 			expectedError: ErrMalformedResponse,
 		},
 		{
-			name: "request stuck",
+			name: "connection failed",
+
+			url:  "rtsp://u1:p1@127.0.0.1:554/stream1",
+			conn: newOpenErrorTransport(),
+
+			expectedError: transportOpenError,
+		},
+		{
+			name: "call timout",
 
 			url: "rtsp://u1:p1@127.0.0.1:554/stream1",
 			conn: newMockTransport([]transportSequence{
@@ -329,7 +320,7 @@ func TestClientDescribe(t *testing.T) {
 						HeaderCSeq:   "0",
 						HeaderAccept: ContentTypeSDP,
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 						Headers:    make(map[string]string),
 						Body:       []byte("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=-\nt=0 0\nm=video 0 RTP/AVP 96\na=rtpmap:96 H264/90000\n"),
@@ -342,12 +333,30 @@ func TestClientDescribe(t *testing.T) {
 			timeout:       100 * time.Millisecond,
 			expectedError: context.DeadlineExceeded,
 		},
+		{
+			name: "call failed",
+
+			url: "rtsp://u1:p1@127.0.0.1:554/stream1",
+			conn: newMockTransport([]transportSequence{
+				{
+					method: "DESCRIBE",
+					url:    "rtsp://127.0.0.1:554/stream1",
+					headers: map[string]string{
+						HeaderCSeq:   "0",
+						HeaderAccept: ContentTypeSDP,
+					},
+					err: callError,
+				},
+			}),
+
+			expectedError: callError,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			u, _ := url.Parse(tt.url)
-			c := newClientWithConn(u, tt.conn, ClientConfig{})
+			c := newClientWithConn(u, tt.conn, ClientConfig{Transport: TransportModeTCP})
 
 			ctx := context.Background()
 			if tt.timeout != 0 {
@@ -394,7 +403,7 @@ func TestClientSetup(t *testing.T) {
 		expectedError   error
 	}{
 		{
-			name: "passes successfully",
+			name: "OK",
 
 			url: "rtsp://u1:p1@127.0.0.1:554/stream1",
 			conn: newMockTransport([]transportSequence{
@@ -405,7 +414,7 @@ func TestClientSetup(t *testing.T) {
 						HeaderCSeq:   "0",
 						HeaderAccept: ContentTypeSDP,
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 						Headers:    make(map[string]string),
 						Body:       []byte("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=-\nt=0 0\nm=video 0 RTP/AVP 96\na=control:track1\na=rtpmap:96 H264/90000\n"),
@@ -418,21 +427,19 @@ func TestClientSetup(t *testing.T) {
 						HeaderCSeq:      "1",
 						HeaderTransport: "RTP/AVP/TCP;unicast;interleaved=0-1",
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 						Headers: map[string]string{
 							HeaderSession: "Session1",
 						},
-						Body: nil,
 					},
 				},
 			}),
 
 			expectedSession: "Session1",
-			expectedError:   nil,
 		},
 		{
-			name: "passes successfully, timeout removed from session",
+			name: "OK session header cleaned up",
 
 			url: "rtsp://u1:p1@127.0.0.1:554/stream1",
 			conn: newMockTransport([]transportSequence{
@@ -443,7 +450,7 @@ func TestClientSetup(t *testing.T) {
 						HeaderCSeq:   "0",
 						HeaderAccept: ContentTypeSDP,
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 						Headers:    make(map[string]string),
 						Body:       []byte("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=-\nt=0 0\nm=video 0 RTP/AVP 96\na=control:track1\na=rtpmap:96 H264/90000\n"),
@@ -456,21 +463,19 @@ func TestClientSetup(t *testing.T) {
 						HeaderCSeq:      "1",
 						HeaderTransport: "RTP/AVP/TCP;unicast;interleaved=0-1",
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 						Headers: map[string]string{
 							HeaderSession: "Session1; timeout=15",
 						},
-						Body: nil,
 					},
 				},
 			}),
 
 			expectedSession: "Session1",
-			expectedError:   nil,
 		},
 		{
-			name: "bad request",
+			name: "OK session header missing",
 
 			url: "rtsp://u1:p1@127.0.0.1:554/stream1",
 			conn: newMockTransport([]transportSequence{
@@ -481,7 +486,7 @@ func TestClientSetup(t *testing.T) {
 						HeaderCSeq:   "0",
 						HeaderAccept: ContentTypeSDP,
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 						Headers:    make(map[string]string),
 						Body:       []byte("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=-\nt=0 0\nm=video 0 RTP/AVP 96\na=control:track1\na=rtpmap:96 H264/90000\n"),
@@ -494,7 +499,40 @@ func TestClientSetup(t *testing.T) {
 						HeaderCSeq:      "1",
 						HeaderTransport: "RTP/AVP/TCP;unicast;interleaved=0-1",
 					},
-					resp: Response{
+					resp: response{
+						StatusCode: 200,
+					},
+				},
+			}),
+
+			expectedError: ErrMalformedResponse,
+		},
+		{
+			name: "BAD REQUEST",
+
+			url: "rtsp://u1:p1@127.0.0.1:554/stream1",
+			conn: newMockTransport([]transportSequence{
+				{
+					method: "DESCRIBE",
+					url:    "rtsp://127.0.0.1:554/stream1",
+					headers: map[string]string{
+						HeaderCSeq:   "0",
+						HeaderAccept: ContentTypeSDP,
+					},
+					resp: response{
+						StatusCode: 200,
+						Headers:    make(map[string]string),
+						Body:       []byte("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=-\nt=0 0\nm=video 0 RTP/AVP 96\na=control:track1\na=rtpmap:96 H264/90000\n"),
+					},
+				},
+				{
+					method: "SETUP",
+					url:    "rtsp://127.0.0.1:554/stream1/track1",
+					headers: map[string]string{
+						HeaderCSeq:      "1",
+						HeaderTransport: "RTP/AVP/TCP;unicast;interleaved=0-1",
+					},
+					resp: response{
 						StatusCode: 400,
 						Headers:    map[string]string{},
 						Body:       nil,
@@ -505,7 +543,7 @@ func TestClientSetup(t *testing.T) {
 			expectedError: ErrRequestFailed,
 		},
 		{
-			name: "request stuck",
+			name: "call timeout",
 
 			url: "rtsp://u1:p1@127.0.0.1:554/stream1",
 			conn: newMockTransport([]transportSequence{
@@ -516,7 +554,7 @@ func TestClientSetup(t *testing.T) {
 						HeaderCSeq:   "0",
 						HeaderAccept: ContentTypeSDP,
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 						Headers:    make(map[string]string),
 						Body:       []byte("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=-\nt=0 0\nm=video 0 RTP/AVP 96\na=control:track1\na=rtpmap:96 H264/90000\n"),
@@ -529,7 +567,7 @@ func TestClientSetup(t *testing.T) {
 						HeaderCSeq:      "1",
 						HeaderTransport: "RTP/AVP/TCP;unicast;interleaved=0-1",
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 						Headers: map[string]string{
 							HeaderSession: "Session1",
@@ -544,13 +582,84 @@ func TestClientSetup(t *testing.T) {
 			timeout:       100 * time.Millisecond,
 			expectedError: context.DeadlineExceeded,
 		},
+		{
+			name: "call failed",
+
+			url: "rtsp://u1:p1@127.0.0.1:554/stream1",
+			conn: newMockTransport([]transportSequence{
+				{
+					method: "DESCRIBE",
+					url:    "rtsp://127.0.0.1:554/stream1",
+					headers: map[string]string{
+						HeaderCSeq:   "0",
+						HeaderAccept: ContentTypeSDP,
+					},
+					resp: response{
+						StatusCode: 200,
+						Headers:    make(map[string]string),
+						Body:       []byte("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=-\nt=0 0\nm=video 0 RTP/AVP 96\na=control:track1\na=rtpmap:96 H264/90000\n"),
+					},
+				},
+				{
+					method: "SETUP",
+					url:    "rtsp://127.0.0.1:554/stream1/track1",
+					headers: map[string]string{
+						HeaderCSeq:      "1",
+						HeaderTransport: "RTP/AVP/TCP;unicast;interleaved=0-1",
+					},
+					err: callError,
+				},
+			}),
+
+			expectedError: callError,
+		},
+		{
+			name: "control attribute is missing",
+
+			url: "rtsp://u1:p1@127.0.0.1:554/stream1",
+			conn: newMockTransport([]transportSequence{
+				{
+					method: "DESCRIBE",
+					url:    "rtsp://127.0.0.1:554/stream1",
+					headers: map[string]string{
+						HeaderCSeq:   "0",
+						HeaderAccept: ContentTypeSDP,
+					},
+					resp: response{
+						StatusCode: 200,
+						Headers:    make(map[string]string),
+						Body:       []byte("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=-\nt=0 0\nm=video 0 RTP/AVP 96\na=rtpmap:96 H264/90000\n"),
+					},
+				},
+				{
+					method: "SETUP",
+					url:    "rtsp://127.0.0.1:554/stream1/track1",
+					headers: map[string]string{
+						HeaderCSeq:      "1",
+						HeaderTransport: "RTP/AVP/TCP;unicast;interleaved=0-1",
+					},
+					resp: response{
+						StatusCode: 200,
+						Headers: map[string]string{
+							HeaderSession: "Session1",
+						},
+						Body: nil,
+					},
+				},
+			}),
+
+			expectedError: ErrMalformedRequest,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			u, _ := url.Parse(tt.url)
-			c := newClientWithConn(u, tt.conn, ClientConfig{})
-			s, _ := c.Describe(context.Background())
+			c := newClientWithConn(u, tt.conn, ClientConfig{Transport: TransportModeTCP})
+			s, err := c.Describe(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
 
 			ctx := context.Background()
 			if tt.timeout != 0 {
@@ -559,7 +668,7 @@ func TestClientSetup(t *testing.T) {
 				defer cancel()
 			}
 
-			err := c.Setup(ctx, s.MediaDescriptions[0])
+			err = c.Setup(ctx, s.MediaDescriptions[0])
 
 			if tt.expectedError != nil {
 				if !errors.Is(err, tt.expectedError) {
@@ -594,7 +703,7 @@ func TestClientPlay(t *testing.T) {
 		expectedError error
 	}{
 		{
-			name: "ready -> playing",
+			name: "OK",
 
 			url: "rtsp://127.0.0.1:554/stream1",
 			conn: newMockTransport([]transportSequence{
@@ -605,7 +714,7 @@ func TestClientPlay(t *testing.T) {
 						HeaderCSeq:   "0",
 						HeaderAccept: ContentTypeSDP,
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 						Body:       []byte("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=-\nt=0 0\nm=video 0 RTP/AVP 96\na=control:track1\na=rtpmap:96 H264/90000\n"),
 					},
@@ -617,7 +726,7 @@ func TestClientPlay(t *testing.T) {
 						HeaderCSeq:      "1",
 						HeaderTransport: "RTP/AVP/TCP;unicast;interleaved=0-1",
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 						Headers: map[string]string{
 							HeaderSession: "Session1",
@@ -631,7 +740,7 @@ func TestClientPlay(t *testing.T) {
 						HeaderCSeq:    "2",
 						HeaderSession: "Session1",
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 					},
 				},
@@ -641,7 +750,7 @@ func TestClientPlay(t *testing.T) {
 			expectedError: nil,
 		},
 		{
-			name: "ready -> playing, bad request",
+			name: "BAD REQUEST",
 
 			url: "rtsp://127.0.0.1:554/stream1",
 			conn: newMockTransport([]transportSequence{
@@ -652,7 +761,7 @@ func TestClientPlay(t *testing.T) {
 						HeaderCSeq:   "0",
 						HeaderAccept: ContentTypeSDP,
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 						Body:       []byte("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=-\nt=0 0\nm=video 0 RTP/AVP 96\na=control:track1\na=rtpmap:96 H264/90000\n"),
 					},
@@ -664,7 +773,7 @@ func TestClientPlay(t *testing.T) {
 						HeaderCSeq:      "1",
 						HeaderTransport: "RTP/AVP/TCP;unicast;interleaved=0-1",
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 						Headers: map[string]string{
 							HeaderSession: "Session1",
@@ -678,7 +787,7 @@ func TestClientPlay(t *testing.T) {
 						HeaderCSeq:    "2",
 						HeaderSession: "Session1",
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 400,
 					},
 				},
@@ -688,7 +797,7 @@ func TestClientPlay(t *testing.T) {
 			expectedError: ErrRequestFailed,
 		},
 		{
-			name: "init -> playing",
+			name: "Play from Init state forbidden",
 
 			url: "rtsp://127.0.0.1:554/stream1",
 			conn: newMockTransport([]transportSequence{
@@ -699,7 +808,7 @@ func TestClientPlay(t *testing.T) {
 						HeaderCSeq:    "0",
 						HeaderSession: "Session1",
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 400,
 					},
 				},
@@ -709,7 +818,7 @@ func TestClientPlay(t *testing.T) {
 			expectedError: ErrInvalidClientState,
 		},
 		{
-			name: "request stuck",
+			name: "call failed",
 
 			url: "rtsp://127.0.0.1:554/stream1",
 			conn: newMockTransport([]transportSequence{
@@ -720,7 +829,7 @@ func TestClientPlay(t *testing.T) {
 						HeaderCSeq:   "0",
 						HeaderAccept: ContentTypeSDP,
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 						Body:       []byte("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=-\nt=0 0\nm=video 0 RTP/AVP 96\na=control:track1\na=rtpmap:96 H264/90000\n"),
 					},
@@ -732,7 +841,7 @@ func TestClientPlay(t *testing.T) {
 						HeaderCSeq:      "1",
 						HeaderTransport: "RTP/AVP/TCP;unicast;interleaved=0-1",
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 						Headers: map[string]string{
 							HeaderSession: "Session1",
@@ -746,7 +855,51 @@ func TestClientPlay(t *testing.T) {
 						HeaderCSeq:    "2",
 						HeaderSession: "Session1",
 					},
-					resp: Response{
+					err: callError,
+				},
+			}),
+
+			expectedError: callError,
+		},
+		{
+			name: "call timeout",
+
+			url: "rtsp://127.0.0.1:554/stream1",
+			conn: newMockTransport([]transportSequence{
+				{
+					method: "DESCRIBE",
+					url:    "rtsp://127.0.0.1:554/stream1",
+					headers: map[string]string{
+						HeaderCSeq:   "0",
+						HeaderAccept: ContentTypeSDP,
+					},
+					resp: response{
+						StatusCode: 200,
+						Body:       []byte("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=-\nt=0 0\nm=video 0 RTP/AVP 96\na=control:track1\na=rtpmap:96 H264/90000\n"),
+					},
+				},
+				{
+					method: "SETUP",
+					url:    "rtsp://127.0.0.1:554/stream1/track1",
+					headers: map[string]string{
+						HeaderCSeq:      "1",
+						HeaderTransport: "RTP/AVP/TCP;unicast;interleaved=0-1",
+					},
+					resp: response{
+						StatusCode: 200,
+						Headers: map[string]string{
+							HeaderSession: "Session1",
+						},
+					},
+				},
+				{
+					method: "PLAY",
+					url:    "rtsp://127.0.0.1:554/stream1",
+					headers: map[string]string{
+						HeaderCSeq:    "2",
+						HeaderSession: "Session1",
+					},
+					resp: response{
 						StatusCode: 200,
 					},
 
@@ -762,7 +915,7 @@ func TestClientPlay(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			u, _ := url.Parse(tt.url)
-			c := newClientWithConn(u, tt.conn, ClientConfig{})
+			c := newClientWithConn(u, tt.conn, ClientConfig{Transport: TransportModeTCP})
 			s, _ := c.Describe(context.Background())
 			if len(s.MediaDescriptions) != 0 {
 				_ = c.Setup(context.Background(), s.MediaDescriptions[0])
@@ -804,7 +957,7 @@ func TestClientTeardown(t *testing.T) {
 		expectedError error
 	}{
 		{
-			name: "ready -> init",
+			name: "OK",
 			url:  "rtsp://u1:p1@127.0.0.1:554/stream1",
 			conn: newMockTransport([]transportSequence{
 				{
@@ -814,7 +967,7 @@ func TestClientTeardown(t *testing.T) {
 						HeaderCSeq:   "0",
 						HeaderAccept: ContentTypeSDP,
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 						Headers:    make(map[string]string),
 						Body:       []byte("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=-\nt=0 0\nm=video 0 RTP/AVP 96\na=control:track1\na=rtpmap:96 H264/90000\n"),
@@ -827,12 +980,11 @@ func TestClientTeardown(t *testing.T) {
 						HeaderCSeq:      "1",
 						HeaderTransport: "RTP/AVP/TCP;unicast;interleaved=0-1",
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 						Headers: map[string]string{
 							HeaderSession: "Session1",
 						},
-						Body: nil,
 					},
 				},
 				{
@@ -842,18 +994,14 @@ func TestClientTeardown(t *testing.T) {
 						HeaderCSeq:    "2",
 						HeaderSession: "Session1",
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
-						Headers:    map[string]string{},
-						Body:       nil,
 					},
 				},
 			}),
-
-			expectedError: nil,
 		},
 		{
-			name: "init -> init",
+			name: "OK from Init state",
 			url:  "rtsp://u1:p1@127.0.0.1:554/stream1",
 			conn: newMockTransport([]transportSequence{
 				{
@@ -863,7 +1011,7 @@ func TestClientTeardown(t *testing.T) {
 						HeaderCSeq:   "0",
 						HeaderAccept: ContentTypeSDP,
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 						Headers:    make(map[string]string),
 						Body:       []byte("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=-\nt=0 0\nm=video 0 RTP/AVP 96\na=control:track1\na=rtpmap:96 H264/90000\n"),
@@ -875,16 +1023,14 @@ func TestClientTeardown(t *testing.T) {
 					headers: map[string]string{
 						HeaderCSeq: "2",
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 					},
 				},
 			}),
-
-			expectedError: nil,
 		},
 		{
-			name: "request stuck",
+			name: "call timout",
 			url:  "rtsp://u1:p1@127.0.0.1:554/stream1",
 			conn: newMockTransport([]transportSequence{
 				{
@@ -894,7 +1040,7 @@ func TestClientTeardown(t *testing.T) {
 						HeaderCSeq:   "0",
 						HeaderAccept: ContentTypeSDP,
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 						Headers:    make(map[string]string),
 						Body:       []byte("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=-\nt=0 0\nm=video 0 RTP/AVP 96\na=control:track1\na=rtpmap:96 H264/90000\n"),
@@ -907,12 +1053,11 @@ func TestClientTeardown(t *testing.T) {
 						HeaderCSeq:      "1",
 						HeaderTransport: "RTP/AVP/TCP;unicast;interleaved=0-1",
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 						Headers: map[string]string{
 							HeaderSession: "Session1",
 						},
-						Body: nil,
 					},
 				},
 				{
@@ -922,7 +1067,7 @@ func TestClientTeardown(t *testing.T) {
 						HeaderCSeq:    "2",
 						HeaderSession: "Session1",
 					},
-					resp: Response{
+					resp: response{
 						StatusCode: 200,
 						Headers:    map[string]string{},
 						Body:       nil,
@@ -939,7 +1084,7 @@ func TestClientTeardown(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			u, _ := url.Parse(tt.url)
-			c := newClientWithConn(u, tt.conn, ClientConfig{})
+			c := newClientWithConn(u, tt.conn, ClientConfig{Transport: TransportModeTCP})
 			s, _ := c.Describe(context.Background())
 			_ = c.Setup(context.Background(), s.MediaDescriptions[0])
 
@@ -974,14 +1119,23 @@ func TestClientTeardown(t *testing.T) {
 }
 
 type mockTransport struct {
+	openError error
+
 	sequence []transportSequence
 	opened   bool
+
+	mediaChannel map[string]int
 }
 
 func newMockTransport(sequence []transportSequence) *mockTransport {
 	return &mockTransport{
-		sequence: sequence,
+		sequence:     sequence,
+		mediaChannel: make(map[string]int),
 	}
+}
+
+func newOpenErrorTransport() *mockTransport {
+	return &mockTransport{openError: transportOpenError}
 }
 
 type transportSequence struct {
@@ -989,16 +1143,17 @@ type transportSequence struct {
 	url     string
 	headers map[string]string
 
-	resp Response
+	resp response
+	err  error
 
 	delay time.Duration
 }
 
-func (m mockTransport) OnRTPPacket(f func(pkt *rtp.Packet)) {
+func (m *mockTransport) Open(ctx context.Context) error {
+	if m.openError != nil {
+		return m.openError
+	}
 
-}
-
-func (m mockTransport) Open(ctx context.Context) error {
 	if m.opened {
 		return ErrConnectionOpened
 	}
@@ -1007,7 +1162,12 @@ func (m mockTransport) Open(ctx context.Context) error {
 	return nil
 }
 
-func (m mockTransport) DoCall(ctx context.Context, method string, url string, headers map[string]string) (Response, error) {
+func (m *mockTransport) OpenMedia(ctx context.Context, media string, onRTPPacket func(pkt *rtp.Packet), onRTPError func(err error)) (string, error) {
+	m.mediaChannel[media] = len(m.mediaChannel) * 2
+	return fmt.Sprintf("RTP/AVP/TCP;unicast;interleaved=%d-%d", m.mediaChannel[media], m.mediaChannel[media]+1), nil
+}
+
+func (m *mockTransport) DoCall(ctx context.Context, method string, url string, headers map[string]string) (response, error) {
 	for _, seq := range m.sequence {
 		if seq.method != method {
 			continue
@@ -1025,13 +1185,17 @@ func (m mockTransport) DoCall(ctx context.Context, method string, url string, he
 			time.Sleep(seq.delay)
 		}
 
+		if seq.err != nil {
+			return response{}, seq.err
+		}
+
 		return seq.resp, nil
 	}
 
-	return Response{}, errors.New("not implemented")
+	return response{}, errors.New("not implemented")
 }
 
-func (m mockTransport) Close() error {
+func (m *mockTransport) Close() error {
 	if !m.opened {
 		return ErrConnectionClosed
 	}

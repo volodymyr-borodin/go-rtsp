@@ -14,56 +14,56 @@ var (
 	FailedToReadBodyError    = errors.New("failed to read body")
 )
 
-type Response struct {
+type response struct {
 	StatusCode int
 	Headers    headers
 	Body       []byte
 }
 
-func readRtspResponse(r *bufio.Reader) (Response, error) {
+func readRtspResponse(r *bufio.Reader) (response, error) {
 	statusLine, err := readStatusLine(r)
 	if err != nil {
-		return Response{}, err
+		return response{}, err
 	}
 
 	statusSplit := strings.Split(statusLine, " ")
 	if len(statusSplit) < 2 {
-		return Response{}, fmt.Errorf("%w: %s", MalformedStatusLineError, statusLine)
+		return response{}, fmt.Errorf("%w: %s", MalformedStatusLineError, statusLine)
 	}
 
 	if statusSplit[0] != "RTSP/1.0" {
-		return Response{}, fmt.Errorf("%w: %s", MalformedStatusLineError, statusLine)
+		return response{}, fmt.Errorf("%w: %s", MalformedStatusLineError, statusLine)
 	}
 
 	statusCode, err := strconv.Atoi(statusSplit[1])
 	if err != nil {
-		return Response{}, fmt.Errorf("%w: %s", MalformedStatusLineError, statusLine)
+		return response{}, fmt.Errorf("%w: %s", MalformedStatusLineError, statusLine)
 	}
 
 	h, err := readHeaders(r)
 	if err != nil {
-		return Response{}, err
+		return response{}, err
 	}
 
 	var body []byte
 	if cl, ok := h.ContentLength(); ok {
 		body, err = readBody(r, cl)
 		if cl != len(body) {
-			return Response{
+			return response{
 				StatusCode: statusCode,
 				Headers:    h,
 			}, fmt.Errorf("%w: expected %d bytes but got %d bytes", FailedToReadBodyError, cl, len(body))
 		}
 
 		if err != nil {
-			return Response{
+			return response{
 				StatusCode: statusCode,
 				Headers:    h,
 			}, fmt.Errorf("%w: %w", FailedToReadBodyError, err)
 		}
 	}
 
-	return Response{
+	return response{
 		StatusCode: statusCode,
 		Headers:    h,
 		Body:       body,

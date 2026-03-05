@@ -24,7 +24,7 @@ func (m *authMiddleware) Open(ctx context.Context) error {
 	return m.next.Open(ctx)
 }
 
-func (m *authMiddleware) DoCall(ctx context.Context, method string, url string, headers map[string]string) (Response, error) {
+func (m *authMiddleware) DoCall(ctx context.Context, method string, url string, headers map[string]string) (response, error) {
 	if m.digest != nil && m.userInfo != nil {
 		username := m.userInfo.Username()
 		password, _ := m.userInfo.Password()
@@ -34,13 +34,13 @@ func (m *authMiddleware) DoCall(ctx context.Context, method string, url string, 
 
 	res, err := m.next.DoCall(ctx, method, url, headers)
 	if err != nil {
-		return Response{}, err
+		return response{}, err
 	}
 
 	if res.StatusCode == StatusUnauthorized && m.userInfo != nil && m.digest == nil {
 		digest, parseErr := parseDigest(res.Headers)
 		if parseErr != nil {
-			return Response{}, fmt.Errorf("%w: %w", err, parseErr)
+			return response{}, fmt.Errorf("%w: %w", err, parseErr)
 		}
 
 		m.digest = &digest

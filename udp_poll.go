@@ -10,12 +10,12 @@ import (
 )
 
 var (
-	MediaTypeAlreadyInitialized = errors.New("media type already initialized")
+	ErrMediaTypeAlreadyInitialized = errors.New("media type already initialized")
 )
 
 type udpPull struct {
 	ip          net.IP
-	connections map[int]*udpConnection
+	connections map[string]*udpConnection
 
 	mutex sync.Mutex
 }
@@ -23,41 +23,29 @@ type udpPull struct {
 func newUdpPull(ip net.IP) *udpPull {
 	return &udpPull{
 		ip:          ip,
-		connections: make(map[int]*udpConnection),
+		connections: make(map[string]*udpConnection),
 	}
 }
 
-func (u *udpPull) OpenMedia(mediaType int, ctx context.Context) (header string, err error) {
+func (u *udpPull) OpenMedia(ctx context.Context, mediaType string, onRTPPackage func(pkt *rtp.Packet), onRTPError func(err error)) (header string, err error) {
 	u.mutex.Lock()
 	defer u.mutex.Unlock()
 
 	c := newUdpConnection(u.ip)
+	c.OnRTPPacket(onRTPPackage)
+	c.OnRTPError(onRTPError)
+
 	err = c.Open(ctx)
 	if err != nil {
 		return "", err
 	}
 
 	if _, ok := u.connections[mediaType]; ok {
-		return "", MediaTypeAlreadyInitialized
+		return "", ErrMediaTypeAlreadyInitialized
 	}
 
 	u.connections[mediaType] = c
 	return fmt.Sprintf("RTP/AVP;unicast;client_port=%d-%d", c.RTPPort(), c.RTCPPort()), nil
-}
-
-func (u *udpPull) OnRTPPacket(f func(pkt *rtp.Packet)) {
-	u.mutex.Lock()
-	defer u.mutex.Unlock()
-
-	for _, c := range u.connections {
-		c.OnRTPPacket(f)
-	}
-}
-
-func (u *udpPull) GetMediaHeader(mediaType int) string {
-	c := u.connections[mediaType]
-
-	return fmt.Sprintf("RTP/AVP;unicast;client_port=%d-%d", c.RTCPPort(), c.RTCPPort())
 }
 
 func (u *udpPull) Close() error {
@@ -72,7 +60,7 @@ func (u *udpPull) Close() error {
 		}
 	}
 
-	u.connections = make(map[int]*udpConnection)
+	u.connections = make(map[string]*udpConnection)
 
 	return errors.Join(errs...)
 }

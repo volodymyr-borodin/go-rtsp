@@ -15,19 +15,16 @@ import (
 
 var clientStateTransitions = map[ClientState]map[method]ClientState{
 	ClientStateInit: {
-		MethodDescribe: ClientStateInit,
-		MethodSetup:    ClientStateReady,
-		MethodTeardown: ClientStateInit,
+		methodSetup:    ClientStateReady,
+		methodTeardown: ClientStateInit,
 	},
 	ClientStateReady: {
-		MethodDescribe: ClientStateReady,
-		MethodSetup:    ClientStateReady,
-		MethodPlay:     ClientStatePlaying,
-		MethodTeardown: ClientStateInit,
+		methodSetup:    ClientStateReady,
+		methodPlay:     ClientStatePlaying,
+		methodTeardown: ClientStateInit,
 	},
 	ClientStatePlaying: {
-		MethodDescribe: ClientStatePlaying,
-		MethodTeardown: ClientStateInit,
+		methodTeardown: ClientStateInit,
 	},
 }
 
@@ -94,9 +91,8 @@ type Client struct {
 	session string
 	cfg     ClientConfig
 
-	mediaPerType           map[uint8]*sdp.MediaDescription
-	onRTPPacket            func(media *sdp.MediaDescription, pkt *rtp.Packet)
-	nextInterleavedChannel int
+	onRTPPacket func(media *sdp.MediaDescription, pkt *rtp.Packet)
+	onRTPError  func(err error)
 }
 
 func NewClient(url *url.URL) (*Client, error) {
@@ -122,6 +118,7 @@ func newClientWithConn(url *url.URL, conn conn, cfg ClientConfig) *Client {
 		mediaConn:   newMediaConn(url, conn, cfg),
 
 		onRTPPacket: func(media *sdp.MediaDescription, pkt *rtp.Packet) {},
+		onRTPError:  func(err error) {},
 	}
 
 	go c.run()
@@ -141,6 +138,10 @@ func (c *Client) OnRTPPacket(f func(media *sdp.MediaDescription, pkt *rtp.Packet
 	c.onRTPPacket = f
 }
 
+func (c *Client) OnRTPError(f func(err error)) {
+	c.onRTPError = f
+}
+
 func (c *Client) Options(ctx context.Context) ([]string, error) {
 	resCh := make(chan optionsResponse)
 
@@ -151,7 +152,7 @@ func (c *Client) Options(ctx context.Context) ([]string, error) {
 			return
 		}
 
-		res, err := c.controlConn.DoCall(ctx, string(MethodOptions), "*", make(map[string]string))
+		res, err := c.controlConn.DoCall(ctx, string(methodOptions), "*", make(map[string]string))
 		if err != nil {
 			resCh <- optionsResponse{err: err}
 			return
@@ -187,12 +188,6 @@ func (c *Client) Describe(ctx context.Context) (sdp.SessionDescription, error) {
 	resCh := make(chan describeResponse)
 
 	c.commandCh <- func() {
-		newState, ok := c.transitionAllowed(MethodDescribe)
-		if !ok {
-			resCh <- describeResponse{err: ErrInvalidClientState}
-			return
-		}
-
 		err := c.ensureControlConnReady(ctx)
 		if err != nil {
 			resCh <- describeResponse{err: err}
@@ -200,7 +195,7 @@ func (c *Client) Describe(ctx context.Context) (sdp.SessionDescription, error) {
 		}
 
 		s := sdp.SessionDescription{}
-		r, err := c.controlConn.DoCall(ctx, string(MethodDescribe), c.path, map[string]string{
+		r, err := c.controlConn.DoCall(ctx, string(methodDescribe), c.path, map[string]string{
 			HeaderAccept: ContentTypeSDP,
 		})
 
@@ -220,26 +215,6 @@ func (c *Client) Describe(ctx context.Context) (sdp.SessionDescription, error) {
 			return
 		}
 
-		c.mediaPerType = make(map[uint8]*sdp.MediaDescription, len(s.MediaDescriptions))
-		for _, media := range s.MediaDescriptions {
-			if len(media.MediaName.Formats) == 0 {
-				resCh <- describeResponse{err: fmt.Errorf("%w: no format specified for media %s", ErrMalformedResponse, media.MediaName.String())}
-				return
-			}
-
-			for _, format := range media.MediaName.Formats {
-				pt, err := strconv.Atoi(format)
-				if err != nil {
-					resCh <- describeResponse{err: fmt.Errorf("%w: invalid media format %s", ErrMalformedResponse, media.MediaName.String())}
-					return
-				}
-
-				c.mediaPerType[uint8(pt)] = media
-			}
-		}
-
-		c.state = newState
-
 		resCh <- describeResponse{sdp: s}
 	}
 
@@ -255,7 +230,7 @@ func (c *Client) Setup(ctx context.Context, media *sdp.MediaDescription) error {
 	resCh := make(chan error)
 
 	c.commandCh <- func() {
-		newState, ok := c.transitionAllowed(MethodSetup)
+		newState, ok := c.transitionAllowed(methodSetup)
 		if !ok {
 			resCh <- ErrInvalidClientState
 			return
@@ -269,7 +244,7 @@ func (c *Client) Setup(ctx context.Context, media *sdp.MediaDescription) error {
 
 		control, ok := media.Attribute("control")
 		if !ok {
-			resCh <- fmt.Errorf("%w: %s", ErrMalformedRequest, "no control attribute")
+			resCh <- fmt.Errorf("%w: %s", ErrMalformedRequest, "control attribute missing")
 			return
 		}
 
@@ -277,31 +252,19 @@ func (c *Client) Setup(ctx context.Context, media *sdp.MediaDescription) error {
 			control, _ = url.JoinPath(c.path, control)
 		}
 
-		if len(media.MediaName.Formats) < 1 {
-			resCh <- fmt.Errorf("%w: no formats specified for %s", ErrMalformedRequest, media.MediaName.String())
-			return
+		onRTPPacket := func(pkt *rtp.Packet) {
+			c.onRTPPacket(media, pkt)
 		}
 
-		format := media.MediaName.Formats[0]
-		mediaType, err := strconv.Atoi(format)
-		if err != nil {
-			resCh <- fmt.Errorf("%w: invalid format %s", ErrMalformedRequest, media.MediaName.String())
-			return
+		onRTPError := func(err error) {
+			c.onRTPError(err)
 		}
 
-		transport, err := c.mediaConn.OpenMedia(mediaType, ctx)
+		transport, err := c.mediaConn.OpenMedia(ctx, media.MediaName.String(), onRTPPacket, onRTPError)
 		if err != nil {
 			resCh <- err
 			return
 		}
-
-		c.mediaConn.OnRTPPacket(func(pkt *rtp.Packet) {
-			if c.onRTPPacket != nil {
-				if media, ok := c.mediaPerType[pkt.PayloadType]; ok {
-					c.onRTPPacket(media, pkt)
-				}
-			}
-		})
 
 		setupHeaders := map[string]string{
 			HeaderTransport: transport,
@@ -311,7 +274,7 @@ func (c *Client) Setup(ctx context.Context, media *sdp.MediaDescription) error {
 			setupHeaders[HeaderSession] = c.session
 		}
 
-		res, err := c.controlConn.DoCall(ctx, string(MethodSetup), control, setupHeaders)
+		res, err := c.controlConn.DoCall(ctx, string(methodSetup), control, setupHeaders)
 		if err != nil {
 			resCh <- err
 			return
@@ -334,7 +297,7 @@ func (c *Client) Setup(ctx context.Context, media *sdp.MediaDescription) error {
 		}
 
 		c.state = newState
-		c.nextInterleavedChannel++
+
 		resCh <- nil
 	}
 
@@ -349,7 +312,7 @@ func (c *Client) Setup(ctx context.Context, media *sdp.MediaDescription) error {
 func (c *Client) Play(ctx context.Context) error {
 	resCh := make(chan error)
 	c.commandCh <- func() {
-		newState, ok := c.transitionAllowed(MethodPlay)
+		newState, ok := c.transitionAllowed(methodPlay)
 		if !ok {
 			resCh <- ErrInvalidClientState
 			return
@@ -361,7 +324,7 @@ func (c *Client) Play(ctx context.Context) error {
 			return
 		}
 
-		res, err := c.controlConn.DoCall(ctx, string(MethodPlay), c.path, map[string]string{
+		res, err := c.controlConn.DoCall(ctx, string(methodPlay), c.path, map[string]string{
 			HeaderSession: c.session,
 		})
 
@@ -391,7 +354,7 @@ func (c *Client) Teardown(ctx context.Context) error {
 	errCh := make(chan error)
 
 	c.commandCh <- func() {
-		newState, ok := c.transitionAllowed(MethodTeardown)
+		newState, ok := c.transitionAllowed(methodTeardown)
 		if !ok {
 			errCh <- ErrInvalidClientState
 			return
@@ -402,12 +365,11 @@ func (c *Client) Teardown(ctx context.Context) error {
 			return
 		}
 
-		_, _ = c.controlConn.DoCall(ctx, string(MethodTeardown), c.path, map[string]string{
+		_, _ = c.controlConn.DoCall(ctx, string(methodTeardown), c.path, map[string]string{
 			HeaderSession: c.session,
 		})
 
 		c.session = ""
-		c.nextInterleavedChannel = 0
 		c.state = newState
 
 		if err := c.controlConn.Close(); !errors.Is(err, ErrConnectionClosed) {
@@ -487,8 +449,7 @@ type conn interface {
 }
 
 type MediaConn interface {
-	OpenMedia(mediaType int, ctx context.Context) (transport string, err error)
-	OnRTPPacket(f func(pkt *rtp.Packet))
+	OpenMedia(ctx context.Context, mediaType string, onRTPPackage func(pkt *rtp.Packet), onRTPError func(err error)) (transport string, err error)
 	Close() error
 }
 
@@ -502,7 +463,7 @@ func newMediaConn(url *url.URL, conn conn, cfg ClientConfig) MediaConn {
 
 type ControlConn interface {
 	Open(ctx context.Context) error
-	DoCall(ctx context.Context, method string, url string, headers map[string]string) (Response, error)
+	DoCall(ctx context.Context, method string, url string, headers map[string]string) (response, error)
 	Close() error
 }
 
@@ -538,7 +499,7 @@ func (m *cseqMiddleware) Open(ctx context.Context) error {
 	return m.next.Open(ctx)
 }
 
-func (m *cseqMiddleware) DoCall(ctx context.Context, method string, url string, headers map[string]string) (Response, error) {
+func (m *cseqMiddleware) DoCall(ctx context.Context, method string, url string, headers map[string]string) (response, error) {
 	headers[HeaderCSeq] = strconv.Itoa(m.cseq)
 	res, err := m.next.DoCall(ctx, method, url, headers)
 

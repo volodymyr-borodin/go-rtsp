@@ -26,6 +26,13 @@ func main() {
 		panic(err)
 	}
 
+	defer func() {
+		err = client.Teardown(context.Background())
+		if err != nil {
+			panic(err)
+		}
+	}()
+
 	client.OnRTPPacket(func(media *sdp.MediaDescription, pkt *rtp.Packet) {
 		slog.Info("RTP packet received",
 			slog.String("media-name", media.MediaName.String()),
@@ -40,7 +47,6 @@ func main() {
 	}
 
 	slog.Info("RTSP options", slog.String("methods", fmt.Sprintf("%+v", supportedMethods)))
-	_ = supportedMethods
 
 	sdp, err := client.Describe(ctx)
 	if err != nil {

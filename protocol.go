@@ -3,11 +3,11 @@ package rtsp
 type method string
 
 const (
-	MethodDescribe method = "DESCRIBE"
-	MethodOptions  method = "OPTIONS"
-	MethodPlay     method = "PLAY"
-	MethodSetup    method = "SETUP"
-	MethodTeardown method = "TEARDOWN"
+	methodDescribe method = "DESCRIBE"
+	methodOptions  method = "OPTIONS"
+	methodPlay     method = "PLAY"
+	methodSetup    method = "SETUP"
+	methodTeardown method = "TEARDOWN"
 )
 
 const (

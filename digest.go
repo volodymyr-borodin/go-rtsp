@@ -10,7 +10,7 @@ import (
 )
 
 var (
-	MalformedDigestHeader = errors.New("malformed digest header")
+	ErrMalformedDigestHeader = errors.New("malformed digest header")
 )
 
 // Digest RFC 2069 implementation
@@ -21,13 +21,13 @@ type Digest struct {
 
 func ParseDigest(header string) (Digest, error) {
 	if !strings.HasPrefix(header, "Digest ") {
-		return Digest{}, fmt.Errorf("%w: %s", MalformedDigestHeader, header)
+		return Digest{}, fmt.Errorf("%w: %s", ErrMalformedDigestHeader, header)
 	}
 
 	trimmed := strings.TrimPrefix(header, "Digest ")
 	params, err := parseKeyValue(trimmed)
 	if err != nil {
-		return Digest{}, fmt.Errorf("%w: %w", MalformedDigestHeader, err)
+		return Digest{}, fmt.Errorf("%w: %w", ErrMalformedDigestHeader, err)
 	}
 
 	return Digest{
