@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	"github.com/pion/sdp/v3"
 	"github.com/synapti-co/go-rtsp"
@@ -39,6 +40,12 @@ func main() {
 			slog.Int("payload length", len(pkt.Payload)),
 			slog.Int("ssrc", int(pkt.SSRC)),
 			slog.String("attributes", fmt.Sprintf("%+v", media.Attributes)))
+	})
+
+	client.OnRTCPPacket(func(media *sdp.MediaDescription, pkt *rtcp.Packet) {
+		slog.Info("RTCP packet received",
+			slog.String("media-name", media.MediaName.String()),
+			slog.String("pkg", fmt.Sprintf("%+v", *pkt)))
 	})
 
 	supportedMethods, err := client.Options(ctx)

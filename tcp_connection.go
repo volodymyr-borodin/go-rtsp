@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	"io"
 	"net"
@@ -32,9 +33,10 @@ type tcpConnection struct {
 
 	rtspResponse chan callResult
 
-	mediaChannel        map[string]int
-	channelOnRTPPackage map[int]func(pkt *rtp.Packet)
-	channelOnRTPError   map[int]func(err error)
+	mediaChannel         map[string]int
+	channelOnRTPPackage  map[int]func(pkt *rtp.Packet)
+	channelOnRTCPPackage map[int]func(pkt *rtcp.Packet)
+	channelOnRTPError    map[int]func(err error)
 }
 
 func newTcpConnection(address string) *tcpConnection {
@@ -50,9 +52,10 @@ func newTcpConnectionWithDialer(address string, d dialer) *tcpConnection {
 
 		rtspResponse: make(chan callResult),
 
-		mediaChannel:        make(map[string]int),
-		channelOnRTPPackage: make(map[int]func(pkt *rtp.Packet)),
-		channelOnRTPError:   make(map[int]func(err error)),
+		mediaChannel:         make(map[string]int),
+		channelOnRTPPackage:  make(map[int]func(pkt *rtp.Packet)),
+		channelOnRTCPPackage: make(map[int]func(pkt *rtcp.Packet)),
+		channelOnRTPError:    make(map[int]func(err error)),
 	}
 
 	return c
@@ -76,7 +79,10 @@ func (c *tcpConnection) Open(ctx context.Context) error {
 	return nil
 }
 
-func (c *tcpConnection) OpenMedia(ctx context.Context, mediaType string, onRTPPackage func(pkt *rtp.Packet), onRTPError func(err error)) (string, error) {
+func (c *tcpConnection) OpenMedia(ctx context.Context, mediaType string,
+	onRTPPackage func(pkt *rtp.Packet),
+	onRTCPPackage func(pkt *rtcp.Packet),
+	onRTPError func(err error)) (string, error) {
 	if c.conn == nil {
 		return "", ErrConnectionClosed
 	}
@@ -87,6 +93,7 @@ func (c *tcpConnection) OpenMedia(ctx context.Context, mediaType string, onRTPPa
 
 	c.mediaChannel[mediaType] = len(c.mediaChannel) * 2
 	c.channelOnRTPPackage[c.mediaChannel[mediaType]] = onRTPPackage
+	c.channelOnRTCPPackage[c.mediaChannel[mediaType]+1] = onRTCPPackage
 	c.channelOnRTPError[c.mediaChannel[mediaType]] = onRTPError
 
 	return fmt.Sprintf("RTP/AVP/TCP;unicast;interleaved=%d-%d", c.mediaChannel[mediaType], c.mediaChannel[mediaType]+1), nil
@@ -149,7 +156,8 @@ func (c *tcpConnection) run() {
 
 		if b[0] == '$' {
 			_, _ = reader.ReadByte() // consume '$'
-			channel, _ := reader.ReadByte()
+			channelByte, _ := reader.ReadByte()
+			channel := int(channelByte)
 
 			lenBytes := make([]byte, 2)
 			_, err := io.ReadFull(reader, lenBytes)
@@ -163,24 +171,31 @@ func (c *tcpConnection) run() {
 			payload := make([]byte, length)
 			_, err = io.ReadFull(reader, payload)
 
-			if channel%2 == 1 {
-				// skip RTCP packets for now
-				continue
-			}
-
 			if err != nil {
-				c.channelOnRTPError[int(channel)](err)
+				c.channelOnRTPError[channel](err)
 				continue
 			}
 
-			var r rtp.Packet
-			err = r.Unmarshal(payload)
-			if err != nil {
-				c.channelOnRTPError[int(channel)](err)
-				continue
-			}
+			if channel%2 == 0 {
+				var r rtp.Packet
+				err = r.Unmarshal(payload)
+				if err != nil {
+					c.channelOnRTPError[channel](err)
+					continue
+				}
 
-			c.channelOnRTPPackage[int(channel)](&r)
+				c.channelOnRTPPackage[channel](&r)
+			} else {
+				pkts, err := rtcp.Unmarshal(payload)
+				if err != nil {
+					c.channelOnRTPError[channel](err)
+					continue
+				}
+
+				for _, pkt := range pkts {
+					c.channelOnRTCPPackage[channel](&pkt)
+				}
+			}
 		} else {
 			response, err := readRtspResponse(reader)
 			c.rtspResponse <- callResult{

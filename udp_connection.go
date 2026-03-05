@@ -3,19 +3,28 @@ package rtsp
 import (
 	"context"
 	"errors"
+	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	"net"
+	"sync"
 )
 
 type udpConnection struct {
 	ip     net.IP
 	binder udpBinder
 
+	rtpDone   chan struct{}
+	rtpDoneWG sync.WaitGroup
+
+	rtcpDone   chan struct{}
+	rtcpDoneWG sync.WaitGroup
+
 	rtpConn  *net.UDPConn
 	rtcpConn *net.UDPConn
 
-	onRTPPackage func(pkt *rtp.Packet)
-	onRTPError   func(err error)
+	onRTPPackage  func(pkt *rtp.Packet)
+	onRTCPPackage func(pkt *rtcp.Packet)
+	onRTPError    func(err error)
 }
 
 func newUdpConnection(ip net.IP) *udpConnection {
@@ -36,9 +45,12 @@ func (c *udpConnection) Open(ctx context.Context) error {
 	}
 
 	c.rtpConn = rtpConn
-	c.rtcpConn = rtcpConn
-
+	c.rtpDoneWG.Add(1)
 	go c.readRTP()
+
+	c.rtcpConn = rtcpConn
+	c.rtcpDoneWG.Add(1)
+	go c.readRTCP()
 
 	return nil
 }
@@ -83,16 +95,26 @@ func (c *udpConnection) OnRTPPacket(f func(pkt *rtp.Packet)) {
 	c.onRTPPackage = f
 }
 
+func (c *udpConnection) OnRTCPPacket(f func(pkt *rtcp.Packet)) {
+	c.onRTCPPackage = f
+}
+
 func (c *udpConnection) OnRTPError(f func(err error)) {
 	c.onRTPError = f
 }
 
 func (c *udpConnection) Close() error {
+	close(c.rtpDone)
+	c.rtpDoneWG.Wait()
+
 	var rtpErr error
 	if c.rtpConn != nil {
 		rtpErr = c.rtpConn.Close()
 		c.rtpConn = nil
 	}
+
+	close(c.rtcpDone)
+	c.rtcpDoneWG.Wait()
 
 	var rtcpErr error
 	if c.rtcpConn != nil {
@@ -104,9 +126,16 @@ func (c *udpConnection) Close() error {
 }
 
 func (c *udpConnection) readRTP() {
+	defer c.rtpDoneWG.Done()
 	buf := make([]byte, 1500) // typical MTU size
 
 	for {
+		select {
+		case <-c.rtpDone:
+			return
+		default:
+		}
+
 		n, _, err := c.rtpConn.ReadFromUDP(buf)
 		if err != nil {
 			c.onRTPError(err)
@@ -120,6 +149,35 @@ func (c *udpConnection) readRTP() {
 		}
 
 		c.onRTPPackage(&pkt)
+	}
+}
+
+func (c *udpConnection) readRTCP() {
+	defer c.rtcpDoneWG.Done()
+	buf := make([]byte, 1500) // typical MTU size
+
+	for {
+		select {
+		case <-c.rtcpDone:
+			return
+		default:
+		}
+
+		n, _, err := c.rtcpConn.ReadFromUDP(buf)
+		if err != nil {
+			c.onRTPError(err)
+			return
+		}
+
+		pkts, err := rtcp.Unmarshal(buf[:n])
+		if err != nil {
+			c.onRTPError(err)
+			continue
+		}
+
+		for _, pkt := range pkts {
+			c.onRTCPPackage(&pkt)
+		}
 	}
 }
 

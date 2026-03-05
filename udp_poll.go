@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	"net"
 	"sync"
@@ -27,12 +28,16 @@ func newUdpPull(ip net.IP) *udpPull {
 	}
 }
 
-func (u *udpPull) OpenMedia(ctx context.Context, mediaType string, onRTPPackage func(pkt *rtp.Packet), onRTPError func(err error)) (header string, err error) {
+func (u *udpPull) OpenMedia(ctx context.Context, mediaType string,
+	onRTPPackage func(pkt *rtp.Packet),
+	onRTCPPackage func(pkt *rtcp.Packet),
+	onRTPError func(err error)) (header string, err error) {
 	u.mutex.Lock()
 	defer u.mutex.Unlock()
 
 	c := newUdpConnection(u.ip)
 	c.OnRTPPacket(onRTPPackage)
+	c.OnRTCPPacket(onRTCPPackage)
 	c.OnRTPError(onRTPError)
 
 	err = c.Open(ctx)

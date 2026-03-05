@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	"io"
 	"net"
@@ -47,7 +48,8 @@ func TestTcpConnectionOpenMedia_TracksMedia(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 
-	transport, err := conn.OpenMedia(context.Background(), "media1", func(pkt *rtp.Packet) {}, func(err error) {})
+	transport, err := conn.OpenMedia(context.Background(), "media1",
+		func(pkt *rtp.Packet) {}, func(pkt *rtcp.Packet) {}, func(err error) {})
 	if err != nil {
 		t.Fatalf("%v", err)
 	}
@@ -56,7 +58,8 @@ func TestTcpConnectionOpenMedia_TracksMedia(t *testing.T) {
 		t.Fatalf("transport: %s", transport)
 	}
 
-	transport2, err := conn.OpenMedia(context.Background(), "media2", func(pkt *rtp.Packet) {}, func(err error) {})
+	transport2, err := conn.OpenMedia(context.Background(), "media2",
+		func(pkt *rtp.Packet) {}, func(pkt *rtcp.Packet) {}, func(err error) {})
 	if err != nil {
 		t.Fatalf("%v", err)
 	}
@@ -73,7 +76,8 @@ func TestTcpConnectionOpenMedia_MediaDuplicated(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 
-	transport, err := conn.OpenMedia(context.Background(), "media1", func(pkt *rtp.Packet) {}, func(err error) {})
+	transport, err := conn.OpenMedia(context.Background(), "media1",
+		func(pkt *rtp.Packet) {}, func(pkt *rtcp.Packet) {}, func(err error) {})
 	if err != nil {
 		t.Fatalf("%v", err)
 	}
@@ -82,7 +86,8 @@ func TestTcpConnectionOpenMedia_MediaDuplicated(t *testing.T) {
 		t.Fatalf("transport: %s", transport)
 	}
 
-	transport, err = conn.OpenMedia(context.Background(), "media1", func(pkt *rtp.Packet) {}, func(err error) {})
+	transport, err = conn.OpenMedia(context.Background(), "media1",
+		func(pkt *rtp.Packet) {}, func(pkt *rtcp.Packet) {}, func(err error) {})
 	if !errors.Is(err, ErrMediaAlreadyExists) {
 		t.Fatalf("%v", err)
 	}
@@ -226,11 +231,14 @@ func TestTcpConnectionOnRTPPacket(t *testing.T) {
 
 			ch := make(chan *rtp.Packet)
 			chErr := make(chan error)
-			_, err = conn.OpenMedia(context.Background(), "media1", func(p *rtp.Packet) {
-				ch <- p
-			}, func(err error) {
-				chErr <- err
-			})
+			_, err = conn.OpenMedia(context.Background(), "media1",
+				func(p *rtp.Packet) {
+					ch <- p
+				},
+				func(p *rtcp.Packet) {},
+				func(err error) {
+					chErr <- err
+				})
 
 			select {
 			case p := <-ch:

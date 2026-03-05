@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	"github.com/pion/sdp/v3"
 	"net"
@@ -91,8 +92,9 @@ type Client struct {
 	session string
 	cfg     ClientConfig
 
-	onRTPPacket func(media *sdp.MediaDescription, pkt *rtp.Packet)
-	onRTPError  func(err error)
+	onRTPPacket  func(media *sdp.MediaDescription, pkt *rtp.Packet)
+	onRTCPPacket func(media *sdp.MediaDescription, pkt *rtcp.Packet)
+	onRTPError   func(err error)
 }
 
 func NewClient(url *url.URL) (*Client, error) {
@@ -136,6 +138,10 @@ func (c *Client) State() ClientState {
 
 func (c *Client) OnRTPPacket(f func(media *sdp.MediaDescription, pkt *rtp.Packet)) {
 	c.onRTPPacket = f
+}
+
+func (c *Client) OnRTCPPacket(f func(media *sdp.MediaDescription, pkt *rtcp.Packet)) {
+	c.onRTCPPacket = f
 }
 
 func (c *Client) OnRTPError(f func(err error)) {
@@ -256,11 +262,15 @@ func (c *Client) Setup(ctx context.Context, media *sdp.MediaDescription) error {
 			c.onRTPPacket(media, pkt)
 		}
 
+		onRTCPPacket := func(pkt *rtcp.Packet) {
+			c.onRTCPPacket(media, pkt)
+		}
+
 		onRTPError := func(err error) {
 			c.onRTPError(err)
 		}
 
-		transport, err := c.mediaConn.OpenMedia(ctx, media.MediaName.String(), onRTPPacket, onRTPError)
+		transport, err := c.mediaConn.OpenMedia(ctx, media.MediaName.String(), onRTPPacket, onRTCPPacket, onRTPError)
 		if err != nil {
 			resCh <- err
 			return
@@ -449,7 +459,10 @@ type conn interface {
 }
 
 type MediaConn interface {
-	OpenMedia(ctx context.Context, mediaType string, onRTPPackage func(pkt *rtp.Packet), onRTPError func(err error)) (transport string, err error)
+	OpenMedia(ctx context.Context, mediaType string,
+		onRTPPackage func(pkt *rtp.Packet),
+		onRTCPPackage func(pkt *rtcp.Packet),
+		onRTPError func(err error)) (transport string, err error)
 	Close() error
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	"github.com/pion/sdp/v3"
 
@@ -1162,7 +1163,10 @@ func (m *mockTransport) Open(ctx context.Context) error {
 	return nil
 }
 
-func (m *mockTransport) OpenMedia(ctx context.Context, media string, onRTPPacket func(pkt *rtp.Packet), onRTPError func(err error)) (string, error) {
+func (m *mockTransport) OpenMedia(ctx context.Context, media string,
+	onRTPPacket func(pkt *rtp.Packet),
+	onRTCPPacket func(pkt *rtcp.Packet),
+	onRTPError func(err error)) (string, error) {
 	m.mediaChannel[media] = len(m.mediaChannel) * 2
 	return fmt.Sprintf("RTP/AVP/TCP;unicast;interleaved=%d-%d", m.mediaChannel[media], m.mediaChannel[media]+1), nil
 }
