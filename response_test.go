@@ -51,7 +51,7 @@ func TestReadRtspResponse(t *testing.T) {
 			expectedStatusCode: 0,
 			expectedHeaders:    map[string]string{},
 			expectedBody:       make([]byte, 0),
-			expectedError:      MalformedStatusLineError,
+			expectedError:      ErrMalformedStatusLine,
 		},
 		{
 			name:   "unsupported protocol",
@@ -60,7 +60,7 @@ func TestReadRtspResponse(t *testing.T) {
 			expectedStatusCode: 0,
 			expectedHeaders:    map[string]string{},
 			expectedBody:       make([]byte, 0),
-			expectedError:      MalformedStatusLineError,
+			expectedError:      ErrMalformedStatusLine,
 		},
 		{
 			name:   "unable to parse status code protocol",
@@ -69,7 +69,7 @@ func TestReadRtspResponse(t *testing.T) {
 			expectedStatusCode: 0,
 			expectedHeaders:    map[string]string{},
 			expectedBody:       make([]byte, 0),
-			expectedError:      MalformedStatusLineError,
+			expectedError:      ErrMalformedStatusLine,
 		},
 		{
 			name:   "content length mismatch",
@@ -78,7 +78,7 @@ func TestReadRtspResponse(t *testing.T) {
 			expectedStatusCode: 200,
 			expectedHeaders:    map[string]string{"reqh1": "resv1"},
 			expectedBody:       make([]byte, 0),
-			expectedError:      FailedToReadBodyError,
+			expectedError:      ErrFailedToReadBody,
 		},
 	}
 

@@ -45,13 +45,6 @@ const (
 	ClientStatePlaying ClientState = "PLAYING"
 )
 
-type transportType int
-
-const (
-	transportTCP transportType = iota
-	transportUDP
-)
-
 type TransportMode int
 
 const (
@@ -65,12 +58,6 @@ type ClientOption func(*ClientConfig)
 func WithTransport(t TransportMode) ClientOption {
 	return func(c *ClientConfig) {
 		c.Transport = t
-	}
-}
-
-func WithControlMiddleware(m func(conn ControlConn) ControlConn) ClientOption {
-	return func(c *ClientConfig) {
-		c.ControlMiddlewares = append(c.ControlMiddlewares, m)
 	}
 }
 
@@ -90,18 +77,13 @@ type Client struct {
 	mediaConn   MediaConn
 
 	session string
-	cfg     ClientConfig
 
 	onRTPPacket  func(media *sdp.MediaDescription, pkt *rtp.Packet)
 	onRTCPPacket func(media *sdp.MediaDescription, pkt *rtcp.Packet)
 	onRTPError   func(err error)
 }
 
-func NewClient(url *url.URL) (*Client, error) {
-	return NewClientWithOptions(url)
-}
-
-func NewClientWithOptions(url *url.URL, opts ...ClientOption) (*Client, error) {
+func NewClient(url *url.URL, opts ...ClientOption) (*Client, error) {
 	cfg := ClientConfig{}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -150,7 +132,6 @@ func (c *Client) OnRTPError(f func(err error)) {
 
 func (c *Client) Options(ctx context.Context) ([]string, error) {
 	resCh := make(chan optionsResponse)
-
 	c.commandCh <- func() {
 		err := c.ensureControlConnReady(ctx)
 		if err != nil {
@@ -192,7 +173,6 @@ func (c *Client) Options(ctx context.Context) ([]string, error) {
 
 func (c *Client) Describe(ctx context.Context) (sdp.SessionDescription, error) {
 	resCh := make(chan describeResponse)
-
 	c.commandCh <- func() {
 		err := c.ensureControlConnReady(ctx)
 		if err != nil {
@@ -234,7 +214,6 @@ func (c *Client) Describe(ctx context.Context) (sdp.SessionDescription, error) {
 
 func (c *Client) Setup(ctx context.Context, media *sdp.MediaDescription) error {
 	resCh := make(chan error)
-
 	c.commandCh <- func() {
 		newState, ok := c.transitionAllowed(methodSetup)
 		if !ok {
@@ -362,7 +341,6 @@ func (c *Client) Play(ctx context.Context) error {
 
 func (c *Client) Teardown(ctx context.Context) error {
 	errCh := make(chan error)
-
 	c.commandCh <- func() {
 		newState, ok := c.transitionAllowed(methodTeardown)
 		if !ok {
@@ -381,6 +359,7 @@ func (c *Client) Teardown(ctx context.Context) error {
 
 		c.session = ""
 		c.state = newState
+		close(c.commandCh)
 
 		if err := c.controlConn.Close(); !errors.Is(err, ErrConnectionClosed) {
 			errCh <- err
@@ -415,11 +394,8 @@ func (c *Client) transitionAllowed(method method) (ClientState, bool) {
 }
 
 func (c *Client) run() {
-	for {
-		select {
-		case cmd := <-c.commandCh:
-			cmd()
-		}
+	for cmd := range c.commandCh {
+		cmd()
 	}
 }
 
@@ -467,11 +443,14 @@ type MediaConn interface {
 }
 
 func newMediaConn(url *url.URL, conn conn, cfg ClientConfig) MediaConn {
-	if cfg.Transport == TransportModeTCP {
+	switch cfg.Transport {
+	case TransportModeTCP:
 		return conn
+	case TransportModeAuto, TransportModeUDP:
+		fallthrough
+	default:
+		return newUdpPull(net.ParseIP(url.Host))
 	}
-
-	return newUdpPull(net.ParseIP(url.Host))
 }
 
 type ControlConn interface {

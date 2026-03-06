@@ -33,6 +33,7 @@ type tcpConnection struct {
 
 	rtspResponse chan callResult
 
+	commandCh            chan func()
 	mediaChannel         map[string]int
 	channelOnRTPPackage  map[int]func(pkt *rtp.Packet)
 	channelOnRTCPPackage map[int]func(pkt *rtcp.Packet)
@@ -52,6 +53,7 @@ func newTcpConnectionWithDialer(address string, d dialer) *tcpConnection {
 
 		rtspResponse: make(chan callResult),
 
+		commandCh:            make(chan func(), 1),
 		mediaChannel:         make(map[string]int),
 		channelOnRTPPackage:  make(map[int]func(pkt *rtp.Packet)),
 		channelOnRTCPPackage: make(map[int]func(pkt *rtcp.Packet)),
@@ -83,18 +85,30 @@ func (c *tcpConnection) OpenMedia(ctx context.Context, mediaType string,
 	onRTPPackage func(pkt *rtp.Packet),
 	onRTCPPackage func(pkt *rtcp.Packet),
 	onRTPError func(err error)) (string, error) {
-	if c.conn == nil {
-		return "", ErrConnectionClosed
+
+	resCh := make(chan error)
+
+	c.commandCh <- func() {
+		if c.conn == nil {
+			resCh <- ErrConnectionOpened
+			return
+		}
+
+		if _, ok := c.mediaChannel[mediaType]; ok {
+			resCh <- ErrMediaAlreadyExists
+			return
+		}
+
+		c.mediaChannel[mediaType] = len(c.mediaChannel) * 2
+		c.channelOnRTPPackage[c.mediaChannel[mediaType]] = onRTPPackage
+		c.channelOnRTCPPackage[c.mediaChannel[mediaType]+1] = onRTCPPackage
+		c.channelOnRTPError[c.mediaChannel[mediaType]] = onRTPError
+		resCh <- nil
 	}
 
-	if _, ok := c.mediaChannel[mediaType]; ok {
-		return "", ErrMediaAlreadyExists
+	if err := <-resCh; err != nil {
+		return "", err
 	}
-
-	c.mediaChannel[mediaType] = len(c.mediaChannel) * 2
-	c.channelOnRTPPackage[c.mediaChannel[mediaType]] = onRTPPackage
-	c.channelOnRTCPPackage[c.mediaChannel[mediaType]+1] = onRTCPPackage
-	c.channelOnRTPError[c.mediaChannel[mediaType]] = onRTPError
 
 	return fmt.Sprintf("RTP/AVP/TCP;unicast;interleaved=%d-%d", c.mediaChannel[mediaType], c.mediaChannel[mediaType]+1), nil
 }
@@ -144,13 +158,18 @@ func (c *tcpConnection) run() {
 		case <-c.done:
 			_ = c.conn.Close()
 			c.conn = nil
-
 			return
+		case cmd := <-c.commandCh:
+			cmd()
 		default:
 		}
 
 		b, err := reader.Peek(1)
 		if err != nil {
+			if errors.Is(err, io.EOF) {
+				continue
+			}
+
 			return
 		}
 
@@ -162,7 +181,7 @@ func (c *tcpConnection) run() {
 			lenBytes := make([]byte, 2)
 			_, err := io.ReadFull(reader, lenBytes)
 			if err != nil {
-				c.channelOnRTPError[int(channel)](err)
+				c.channelOnRTPError[channel](err)
 
 				continue
 			}
@@ -209,10 +228,8 @@ func (c *tcpConnection) run() {
 func (c *tcpConnection) send(method string, url string, headers map[string]string) error {
 	req := fmt.Sprintf("%s %s RTSP/1.0\r\n", method, url)
 
-	if headers != nil {
-		for k, v := range headers {
-			req += fmt.Sprintf("%s: %s\r\n", k, v)
-		}
+	for k, v := range headers {
+		req += fmt.Sprintf("%s: %s\r\n", k, v)
 	}
 
 	req += "\r\n"

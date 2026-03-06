@@ -16,3 +16,11 @@ This library implements a focused subset of the RTSP protocol needed to read RTS
 
 - **RTSP over TCP**: `examples/client-rtsp-over-tcp`
 - **RTSP over UDP**: `examples/client-rtsp-over-udp`
+
+### Support matrix
+
+|                  | Supported                                          | Not supported                                                               |
+|------------------|----------------------------------------------------|-----------------------------------------------------------------------------|
+| **RTSP methods** | `OPTIONS`, `DESCRIBE`, `SETUP`, `PLAY`, `TEARDOWN` | `PAUSE`, `ANNOUNCE`, `RECORD`, `GET_PARAMETER`, `SET_PARAMETER`, `REDIRECT` |
+| **RTSP client**  | TCP, UDP, digest authentication                    | RTCP handling and stats callbacks, automatic reconnection/keep-lives        |
+| **RTSP server**  |                                                    | RTSP server implementation                                                  |

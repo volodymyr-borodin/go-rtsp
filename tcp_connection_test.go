@@ -15,11 +15,11 @@ import (
 )
 
 func TestTcpConnectionOpen_DialContextFailed(t *testing.T) {
-	conn := newTcpConnectionWithDialer("", newErrMockNetDialer(transportOpenError))
+	conn := newTcpConnectionWithDialer("", newErrMockNetDialer(errTransport))
 
 	err := conn.Open(context.Background())
-	if !errors.Is(err, transportOpenError) {
-		t.Fatalf("expected error %s, got %s", transportOpenError, err)
+	if !errors.Is(err, errTransport) {
+		t.Fatalf("expected error %s, got %s", errTransport, err)
 	}
 }
 
@@ -90,6 +90,10 @@ func TestTcpConnectionOpenMedia_MediaDuplicated(t *testing.T) {
 		func(pkt *rtp.Packet) {}, func(pkt *rtcp.Packet) {}, func(err error) {})
 	if !errors.Is(err, ErrMediaAlreadyExists) {
 		t.Fatalf("%v", err)
+	}
+
+	if transport != "" {
+		t.Fatalf("transport: %s", transport)
 	}
 }
 
@@ -240,6 +244,10 @@ func TestTcpConnectionOnRTPPacket(t *testing.T) {
 					chErr <- err
 				})
 
+			if err != nil {
+				t.Fatalf("%v", err)
+			}
+
 			select {
 			case p := <-ch:
 				if !reflect.DeepEqual(p, tt.expectedRTPPacket) {
@@ -300,7 +308,7 @@ func newErrMockNetDialer(err error) *mockNetDialer {
 	}
 }
 
-func (m mockNetDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+func (m mockNetDialer) DialContext(_ context.Context, _, _ string) (net.Conn, error) {
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -309,7 +317,6 @@ func (m mockNetDialer) DialContext(ctx context.Context, network, address string)
 }
 
 type mockNetConn struct {
-	err   error
 	delay time.Duration
 	mu    sync.Mutex
 
@@ -322,12 +329,6 @@ type mockNetConn struct {
 	response      []byte
 
 	closed bool
-}
-
-func newFailedConn() *mockNetConn {
-	return &mockNetConn{
-		err: transportOpenError,
-	}
 }
 
 func newMockNetConn(expectedWrite, response []byte, delay time.Duration) *mockNetConn {
@@ -383,7 +384,7 @@ func (m *mockNetConn) Read(p []byte) (int, error) {
 	return m.readBuf.Read(p)
 }
 
-func (m *mockNetConn) SetDeadline(t time.Time) error {
+func (m *mockNetConn) SetDeadline(_ time.Time) error {
 	return nil
 }
 
@@ -397,11 +398,11 @@ func (m *mockNetConn) RemoteAddr() net.Addr {
 	panic("implement me")
 }
 
-func (m *mockNetConn) SetReadDeadline(t time.Time) error {
+func (m *mockNetConn) SetReadDeadline(_ time.Time) error {
 	return nil
 }
 
-func (m *mockNetConn) SetWriteDeadline(t time.Time) error {
+func (m *mockNetConn) SetWriteDeadline(_ time.Time) error {
 	return nil
 }
 

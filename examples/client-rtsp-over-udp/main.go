@@ -22,7 +22,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	client, err := rtsp.NewClientWithOptions(u, rtsp.WithTransport(rtsp.TransportModeUDP))
+	client, err := rtsp.NewClient(u, rtsp.WithTransport(rtsp.TransportModeUDP))
 	if err != nil {
 		panic(err)
 	}

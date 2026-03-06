@@ -15,8 +15,8 @@ import (
 	"time"
 )
 
-var transportOpenError = errors.New("mock error")
-var callError = errors.New("mock error")
+var errTransport = errors.New("mock error")
+var errCall = errors.New("mock error")
 
 func TestClientOptions(t *testing.T) {
 	tests := []struct {
@@ -96,7 +96,7 @@ func TestClientOptions(t *testing.T) {
 			url:  "rtsp://u1:p1@127.0.0.1:554/stream1",
 			conn: newOpenErrorTransport(),
 
-			expectedError: transportOpenError,
+			expectedError: errTransport,
 		},
 		{
 			name: "call timout",
@@ -134,11 +134,11 @@ func TestClientOptions(t *testing.T) {
 					headers: map[string]string{
 						HeaderCSeq: "0",
 					},
-					err: callError,
+					err: errCall,
 				},
 			}),
 
-			expectedError: callError,
+			expectedError: errCall,
 		},
 	}
 
@@ -307,7 +307,7 @@ func TestClientDescribe(t *testing.T) {
 			url:  "rtsp://u1:p1@127.0.0.1:554/stream1",
 			conn: newOpenErrorTransport(),
 
-			expectedError: transportOpenError,
+			expectedError: errTransport,
 		},
 		{
 			name: "call timout",
@@ -346,11 +346,11 @@ func TestClientDescribe(t *testing.T) {
 						HeaderCSeq:   "0",
 						HeaderAccept: ContentTypeSDP,
 					},
-					err: callError,
+					err: errCall,
 				},
 			}),
 
-			expectedError: callError,
+			expectedError: errCall,
 		},
 	}
 
@@ -608,11 +608,11 @@ func TestClientSetup(t *testing.T) {
 						HeaderCSeq:      "1",
 						HeaderTransport: "RTP/AVP/TCP;unicast;interleaved=0-1",
 					},
-					err: callError,
+					err: errCall,
 				},
 			}),
 
-			expectedError: callError,
+			expectedError: errCall,
 		},
 		{
 			name: "control attribute is missing",
@@ -856,11 +856,11 @@ func TestClientPlay(t *testing.T) {
 						HeaderCSeq:    "2",
 						HeaderSession: "Session1",
 					},
-					err: callError,
+					err: errCall,
 				},
 			}),
 
-			expectedError: callError,
+			expectedError: errCall,
 		},
 		{
 			name: "call timeout",
@@ -1136,7 +1136,7 @@ func newMockTransport(sequence []transportSequence) *mockTransport {
 }
 
 func newOpenErrorTransport() *mockTransport {
-	return &mockTransport{openError: transportOpenError}
+	return &mockTransport{openError: errTransport}
 }
 
 type transportSequence struct {
