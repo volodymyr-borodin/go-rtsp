@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 )
 
 var clientStateTransitions = map[ClientState]map[method]ClientState{
@@ -35,6 +37,7 @@ var (
 	ErrMalformedRequest   = errors.New("malformed request")
 	ErrRequestFailed      = errors.New("request failed")
 	ErrInvalidClientState = errors.New("incorrect client state")
+	ErrClientClosed       = errors.New("client closed")
 )
 
 type ClientState string
@@ -69,14 +72,16 @@ type ClientConfig struct {
 
 type Client struct {
 	commandCh chan func()
+	closed    int64
+	closeOnce sync.Once
 
-	state ClientState
-	path  string
+	path    string
+	state   ClientState
+	session string
+	stateMu sync.RWMutex
 
 	controlConn ControlConn
 	mediaConn   MediaConn
-
-	session string
 
 	onRTPPacket  func(media *sdp.MediaDescription, pkt *rtp.Packet)
 	onRTCPPacket func(media *sdp.MediaDescription, pkt *rtcp.Packet)
@@ -111,10 +116,16 @@ func newClientWithConn(url *url.URL, conn conn, cfg ClientConfig) *Client {
 }
 
 func (c *Client) Session() string {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+
 	return c.session
 }
 
 func (c *Client) State() ClientState {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+
 	return c.state
 }
 
@@ -131,7 +142,11 @@ func (c *Client) OnRTPError(f func(err error)) {
 }
 
 func (c *Client) Options(ctx context.Context) ([]string, error) {
-	resCh := make(chan optionsResponse)
+	if c.isClosed() {
+		return nil, ErrClientClosed
+	}
+
+	resCh := make(chan optionsResponse, 1)
 	c.commandCh <- func() {
 		err := c.ensureControlConnReady(ctx)
 		if err != nil {
@@ -167,12 +182,17 @@ func (c *Client) Options(ctx context.Context) ([]string, error) {
 	case res := <-resCh:
 		return res.methods, res.err
 	case <-ctx.Done():
+		c.commandCh <- c.close
 		return nil, ctx.Err()
 	}
 }
 
 func (c *Client) Describe(ctx context.Context) (sdp.SessionDescription, error) {
-	resCh := make(chan describeResponse)
+	if c.isClosed() {
+		return sdp.SessionDescription{}, ErrClientClosed
+	}
+
+	resCh := make(chan describeResponse, 1)
 	c.commandCh <- func() {
 		err := c.ensureControlConnReady(ctx)
 		if err != nil {
@@ -208,12 +228,17 @@ func (c *Client) Describe(ctx context.Context) (sdp.SessionDescription, error) {
 	case res := <-resCh:
 		return res.sdp, res.err
 	case <-ctx.Done():
+		c.commandCh <- c.close
 		return sdp.SessionDescription{}, ctx.Err()
 	}
 }
 
 func (c *Client) Setup(ctx context.Context, media *sdp.MediaDescription) error {
-	resCh := make(chan error)
+	if c.isClosed() {
+		return ErrClientClosed
+	}
+
+	resCh := make(chan error, 1)
 	c.commandCh <- func() {
 		newState, ok := c.transitionAllowed(methodSetup)
 		if !ok {
@@ -294,22 +319,27 @@ func (c *Client) Setup(ctx context.Context, media *sdp.MediaDescription) error {
 	case res := <-resCh:
 		return res
 	case <-ctx.Done():
+		c.commandCh <- c.close
 		return ctx.Err()
 	}
 }
 
 func (c *Client) Play(ctx context.Context) error {
-	resCh := make(chan error)
+	if c.isClosed() {
+		return ErrClientClosed
+	}
+
+	errCh := make(chan error, 1)
 	c.commandCh <- func() {
 		newState, ok := c.transitionAllowed(methodPlay)
 		if !ok {
-			resCh <- ErrInvalidClientState
+			errCh <- ErrInvalidClientState
 			return
 		}
 
 		err := c.ensureControlConnReady(ctx)
 		if err != nil {
-			resCh <- err
+			errCh <- err
 			return
 		}
 
@@ -318,31 +348,38 @@ func (c *Client) Play(ctx context.Context) error {
 		})
 
 		if err != nil {
-			resCh <- err
+			errCh <- err
 			return
 		}
 
 		if res.StatusCode != StatusOk {
-			resCh <- fmt.Errorf("%w: %d", ErrRequestFailed, res.StatusCode)
+			errCh <- fmt.Errorf("%w: %d", ErrRequestFailed, res.StatusCode)
 			return
 		}
 
 		c.state = newState
-		resCh <- nil
+		errCh <- nil
 	}
 
 	select {
-	case res := <-resCh:
-		return res
+	case err := <-errCh:
+		return err
 	case <-ctx.Done():
+		c.commandCh <- c.close
 		return ctx.Err()
 	}
 }
 
 func (c *Client) Teardown(ctx context.Context) error {
-	errCh := make(chan error)
+	if c.isClosed() {
+		return ErrClientClosed
+	}
+
+	errCh := make(chan error, 1)
 	c.commandCh <- func() {
-		newState, ok := c.transitionAllowed(methodTeardown)
+		defer c.close()
+
+		_, ok := c.transitionAllowed(methodTeardown)
 		if !ok {
 			errCh <- ErrInvalidClientState
 			return
@@ -357,23 +394,19 @@ func (c *Client) Teardown(ctx context.Context) error {
 			HeaderSession: c.session,
 		})
 
-		c.session = ""
-		c.state = newState
-		close(c.commandCh)
-
-		if err := c.controlConn.Close(); !errors.Is(err, ErrConnectionClosed) {
-			errCh <- err
-		} else {
-			errCh <- nil
-		}
+		errCh <- nil
 	}
 
 	select {
-	case res := <-errCh:
-		return res
+	case err := <-errCh:
+		return err
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (c *Client) isClosed() bool {
+	return atomic.LoadInt64(&c.closed) == 1
 }
 
 func (c *Client) ensureControlConnReady(ctx context.Context) error {
@@ -397,6 +430,22 @@ func (c *Client) run() {
 	for cmd := range c.commandCh {
 		cmd()
 	}
+}
+
+func (c *Client) close() {
+	if c.isClosed() {
+		return
+	}
+
+	c.closeOnce.Do(func() {
+		c.stateMu.Lock()
+		defer c.stateMu.Unlock()
+
+		atomic.StoreInt64(&c.closed, 1)
+		close(c.commandCh)
+		c.session = ""
+		c.state = ClientStateInit
+	})
 }
 
 type describeResponse struct {

@@ -4,15 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/pion/rtcp"
-	"github.com/pion/rtp"
-	"github.com/pion/sdp/v3"
-
 	"net/url"
 	"reflect"
 	"slices"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/pion/rtcp"
+	"github.com/pion/rtp"
+	"github.com/pion/sdp/v3"
 )
 
 var errTransport = errors.New("mock error")
@@ -169,6 +170,22 @@ func TestClientOptions(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestClientOptions_OnClosedClient(t *testing.T) {
+	u, _ := url.Parse("rtsp://u1:p1@127.0.0.1:554/stream1")
+	c := newClientWithConn(u, newMockTransport(nil), ClientConfig{Transport: TransportModeTCP})
+
+	err := c.Teardown(context.Background())
+	if err != nil {
+		panic(err)
+	}
+
+	_, err = c.Options(context.Background())
+
+	if !errors.Is(err, ErrClientClosed) {
+		t.Errorf("expected error %v, got %v", ErrClientClosed, err)
 	}
 }
 
@@ -389,6 +406,22 @@ func TestClientDescribe(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestClientDescribe_OnClosedClient(t *testing.T) {
+	u, _ := url.Parse("rtsp://u1:p1@127.0.0.1:554/stream1")
+	c := newClientWithConn(u, newMockTransport(nil), ClientConfig{Transport: TransportModeTCP})
+
+	err := c.Teardown(context.Background())
+	if err != nil {
+		panic(err)
+	}
+
+	_, err = c.Describe(context.Background())
+
+	if !errors.Is(err, ErrClientClosed) {
+		t.Errorf("expected error %v, got %v", ErrClientClosed, err)
 	}
 }
 
@@ -692,6 +725,22 @@ func TestClientSetup(t *testing.T) {
 	}
 }
 
+func TestClientSetup_OnClosedClient(t *testing.T) {
+	u, _ := url.Parse("rtsp://127.0.0.1:554/stream1")
+	c := newClientWithConn(u, newMockTransport(nil), ClientConfig{Transport: TransportModeTCP})
+
+	err := c.Teardown(context.Background())
+	if err != nil {
+		panic(err)
+	}
+
+	err = c.Setup(context.Background(), nil)
+
+	if !errors.Is(err, ErrClientClosed) {
+		t.Errorf("expected error %v, got %v", ErrClientClosed, err)
+	}
+}
+
 func TestClientPlay(t *testing.T) {
 	tests := []struct {
 		name string
@@ -947,6 +996,21 @@ func TestClientPlay(t *testing.T) {
 	}
 }
 
+func TestClientPlay_OnClosedClient(t *testing.T) {
+	u, _ := url.Parse("rtsp://127.0.0.1:554/stream1")
+	c := newClientWithConn(u, newMockTransport(nil), ClientConfig{Transport: TransportModeTCP})
+
+	err := c.Teardown(context.Background())
+	if err != nil {
+		panic(err)
+	}
+
+	err = c.Play(context.Background())
+	if !errors.Is(err, ErrClientClosed) {
+		t.Errorf("expected error %v, got %v", ErrClientClosed, err)
+	}
+}
+
 func TestClientTeardown(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1124,6 +1188,7 @@ type mockTransport struct {
 
 	sequence []transportSequence
 	opened   bool
+	openedMu sync.Mutex
 
 	mediaChannel map[string]int
 }
@@ -1155,6 +1220,8 @@ func (m *mockTransport) Open(ctx context.Context) error {
 		return m.openError
 	}
 
+	m.openedMu.Lock()
+	defer m.openedMu.Unlock()
 	if m.opened {
 		return ErrConnectionOpened
 	}
@@ -1186,7 +1253,11 @@ func (m *mockTransport) DoCall(ctx context.Context, method string, url string, h
 		}
 
 		if seq.delay != 0 {
-			time.Sleep(seq.delay)
+			select {
+			case <-time.After(seq.delay):
+			case <-ctx.Done():
+				return response{}, ctx.Err()
+			}
 		}
 
 		if seq.err != nil {
@@ -1200,6 +1271,8 @@ func (m *mockTransport) DoCall(ctx context.Context, method string, url string, h
 }
 
 func (m *mockTransport) Close() error {
+	m.openedMu.Lock()
+	defer m.openedMu.Unlock()
 	if !m.opened {
 		return ErrConnectionClosed
 	}

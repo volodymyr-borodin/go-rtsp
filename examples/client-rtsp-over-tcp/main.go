@@ -27,12 +27,12 @@ func main() {
 		panic(err)
 	}
 
-	defer func() {
-		err = client.Teardown(context.Background())
+	defer func(ctx context.Context) {
+		err := client.Teardown(ctx)
 		if err != nil {
 			panic(err)
 		}
-	}()
+	}(ctx)
 
 	client.OnRTPPacket(func(media *sdp.MediaDescription, pkt *rtp.Packet) {
 		slog.Info("RTP packet received",
