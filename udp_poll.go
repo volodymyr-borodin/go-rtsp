@@ -53,6 +53,10 @@ func (u *udpPull) OpenMedia(ctx context.Context, mediaType string,
 	return fmt.Sprintf("RTP/AVP;unicast;client_port=%d-%d", c.RTPPort(), c.RTCPPort()), nil
 }
 
+func (u *udpPull) SendRTCP(ctx context.Context, mediaType string, packet rtcp.Packet) error {
+	panic("implement me")
+}
+
 func (u *udpPull) Close() error {
 	u.mutex.Lock()
 	defer u.mutex.Unlock()

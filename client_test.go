@@ -1270,6 +1270,10 @@ func (m *mockTransport) DoCall(ctx context.Context, method string, url string, h
 	return response{}, errors.New("not implemented")
 }
 
+func (m *mockTransport) SendRTCP(ctx context.Context, mediaType string, pkt rtcp.Packet) error {
+	return nil
+}
+
 func (m *mockTransport) Close() error {
 	m.openedMu.Lock()
 	defer m.openedMu.Unlock()

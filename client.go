@@ -405,6 +405,24 @@ func (c *Client) Teardown(ctx context.Context) error {
 	}
 }
 
+func (c *Client) SendRTCP(ctx context.Context, media *sdp.MediaDescription, pkt rtcp.Packet) error {
+	if c.isClosed() {
+		return ErrClientClosed
+	}
+
+	resCh := make(chan error, 1)
+	c.commandCh <- func() {
+		err := c.ensureControlConnReady(ctx)
+		if err != nil {
+			resCh <- err
+		}
+
+		resCh <- c.mediaConn.SendRTCP(ctx, media.MediaName.String(), pkt)
+	}
+
+	return <-resCh
+}
+
 func (c *Client) isClosed() bool {
 	return atomic.LoadInt64(&c.closed) == 1
 }
@@ -488,6 +506,9 @@ type MediaConn interface {
 		onRTPPackage func(pkt *rtp.Packet),
 		onRTCPPackage func(pkt *rtcp.Packet),
 		onRTPError func(err error)) (transport string, err error)
+
+	SendRTCP(ctx context.Context, mediaType string, pkt rtcp.Packet) error
+
 	Close() error
 }
 

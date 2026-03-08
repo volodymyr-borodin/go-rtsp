@@ -264,6 +264,75 @@ func TestTcpConnectionOnRTPPacket(t *testing.T) {
 	}
 }
 
+func TestTcpConnectionSendRTCP(t *testing.T) {
+	tests := []struct {
+		name string
+
+		conn   *mockNetConn
+		packet rtcp.Packet
+
+		expectedBuffer []byte
+	}{
+		{
+			name: "OK",
+
+			conn:   newMockNetConn(make([]byte, 0), make([]byte, 0), 0),
+			packet: &rtcp.PictureLossIndication{},
+
+			expectedBuffer: []byte{'$', 1, 0, 12},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := newTcpConnectionWithDialer("", newMockNetDialer(tt.conn))
+			err := conn.Open(context.Background())
+			if err != nil {
+				t.Fatalf("%v", err)
+			}
+
+			_, err = conn.OpenMedia(context.Background(), "media1",
+				func(p *rtp.Packet) {},
+				func(p *rtcp.Packet) {},
+				func(err error) {})
+			if err != nil {
+				t.Fatalf("%v", err)
+			}
+
+			err = conn.SendRTCP(context.Background(), "media1", tt.packet)
+			if err != nil {
+				t.Fatalf("%v", err)
+			}
+
+			if !bytes.HasPrefix(tt.conn.writeBuf.Bytes(), tt.expectedBuffer) {
+				t.Fatalf("expected: %v, got: %v", tt.expectedBuffer, tt.conn.writeBuf.Bytes())
+			}
+		})
+	}
+}
+
+func TestTcpConnectionSendRTCP_NoMediaSetup(t *testing.T) {
+	conn := newTcpConnectionWithDialer("", newMockNetDialer(newMockNetConn(make([]byte, 0), make([]byte, 0), 0)))
+	err := conn.Open(context.Background())
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+
+	err = conn.SendRTCP(context.Background(), "media1", &rtcp.PictureLossIndication{})
+	if !errors.Is(err, ErrMediaNotFound) {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestTcpConnectionSendRTCP_ConnectionClosed(t *testing.T) {
+	conn := newTcpConnectionWithDialer("", newMockNetDialer(newMockNetConn(make([]byte, 0), make([]byte, 0), 0)))
+
+	err := conn.SendRTCP(context.Background(), "media1", &rtcp.PictureLossIndication{})
+	if !errors.Is(err, ErrConnectionClosed) {
+		t.Fatalf("%v", err)
+	}
+}
+
 func TestTcpConnectionClose_Opened(t *testing.T) {
 	conn := newTcpConnectionWithDialer("", newMockNetDialer(newMockNetConn(
 		[]byte("DESCRIBE rtsp://1.1.1.1:554/stream1 RTSP/1.0\r\nreqh1: reqv1\r\n\r\n"),

@@ -17,6 +17,7 @@ var (
 	ErrConnectionOpened   = errors.New("connection already opened")
 	ErrConnectionClosed   = errors.New("connection closed")
 	ErrMediaAlreadyExists = errors.New("media already exists")
+	ErrMediaNotFound      = errors.New("media not found")
 )
 
 type dialer interface {
@@ -118,6 +119,20 @@ func (c *tcpConnection) DoCall(ctx context.Context, method string, url string, h
 		return response{}, ErrConnectionClosed
 	}
 
+	c.commandCh <- func() {
+		if deadline, ok := ctx.Deadline(); ok {
+			_ = c.conn.SetDeadline(deadline)
+			defer func(conn net.Conn) {
+				_ = conn.SetDeadline(time.Time{})
+			}(c.conn)
+		}
+
+		err := c.send(method, url, headers)
+		if err != nil {
+			c.rtspResponse <- callResult{err: err}
+		}
+	}
+
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = c.conn.SetDeadline(deadline)
 		defer func(conn net.Conn) {
@@ -131,11 +146,57 @@ func (c *tcpConnection) DoCall(ctx context.Context, method string, url string, h
 	}
 
 	select {
-	case <-ctx.Done():
-		return response{}, ctx.Err()
 	case res := <-c.rtspResponse:
 		return res.r, res.err
+	case <-ctx.Done():
+		return response{}, ctx.Err()
 	}
+}
+
+func (c *tcpConnection) SendRTCP(ctx context.Context, mediaType string, pkt rtcp.Packet) error {
+	if c.conn == nil {
+		return ErrConnectionClosed
+	}
+
+	errCh := make(chan error, 1)
+	c.commandCh <- func() {
+		if deadline, ok := ctx.Deadline(); ok {
+			_ = c.conn.SetDeadline(deadline)
+			defer func(conn net.Conn) {
+				_ = conn.SetDeadline(time.Time{})
+			}(c.conn)
+		}
+
+		channel, ok := c.mediaChannel[mediaType]
+		if !ok {
+			errCh <- fmt.Errorf("%w: %s", ErrMediaNotFound, mediaType)
+			return
+		}
+		rtcpChannel := channel + 1
+		payload, err := pkt.Marshal()
+		if err != nil {
+			errCh <- err
+			return
+		}
+
+		header := []byte{
+			'$',
+			byte(rtcpChannel),
+			byte(len(payload) >> 8),
+			byte(len(payload)),
+		}
+		if _, err := c.conn.Write(header); err != nil {
+			errCh <- err
+			return
+		}
+		if _, err := c.conn.Write(payload); err != nil {
+			errCh <- err
+			return
+		}
+		errCh <- nil
+	}
+
+	return <-errCh
 }
 
 func (c *tcpConnection) Close() error {
