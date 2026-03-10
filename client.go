@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 )
 
 var clientStateTransitions = map[ClientState]map[method]ClientState{
@@ -33,11 +32,12 @@ var clientStateTransitions = map[ClientState]map[method]ClientState{
 
 var (
 	ErrUnauthorized       = errors.New("unauthorized")
-	ErrMalformedResponse  = errors.New("malformed Response")
+	ErrMalformedResponse  = errors.New("malformed response")
 	ErrMalformedRequest   = errors.New("malformed request")
 	ErrRequestFailed      = errors.New("request failed")
 	ErrInvalidClientState = errors.New("incorrect client state")
 	ErrClientClosed       = errors.New("client closed")
+	ErrClientTeardown     = errors.New("client teardown")
 )
 
 type ClientState string
@@ -67,13 +67,16 @@ func WithTransport(t TransportMode) ClientOption {
 type ClientConfig struct {
 	Transport TransportMode
 
+	RtpChannelSize  int
+	RtcpChannelSize int
+	ErrChannelSize  int
+
 	ControlMiddlewares []func(conn ControlConn) ControlConn
 }
 
 type Client struct {
 	commandCh chan func()
-	closed    int64
-	closeOnce sync.Once
+	closed    bool
 
 	path    string
 	state   ClientState
@@ -83,9 +86,9 @@ type Client struct {
 	controlConn ControlConn
 	mediaConn   MediaConn
 
-	onRTPPacket  func(media *sdp.MediaDescription, pkt *rtp.Packet)
-	onRTCPPacket func(media *sdp.MediaDescription, pkt *rtcp.Packet)
-	onRTPError   func(err error)
+	rtpPackets  chan *rtp.Packet
+	rtcpPackets chan *rtcp.Packet
+	err         chan error
 }
 
 func NewClient(url *url.URL, opts ...ClientOption) (*Client, error) {
@@ -94,23 +97,57 @@ func NewClient(url *url.URL, opts ...ClientOption) (*Client, error) {
 		opt(&cfg)
 	}
 
-	return newClientWithConn(url, newTcpConnection(url.Host), cfg), nil
+	return newClientWithConn(url, func(onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt *rtcp.Packet), onRTPError func(err error)) conn {
+		return newTcpConnection(url.Host, onRTPPackage, onRTCPPackage, onRTPError)
+	}, cfg), nil
 }
 
-func newClientWithConn(url *url.URL, conn conn, cfg ClientConfig) *Client {
+func newClientWithConn(url *url.URL, connBuilder func(onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt *rtcp.Packet), onRTPError func(err error)) conn, cfg ClientConfig) *Client {
+	if cfg.RtpChannelSize <= 0 {
+		cfg.RtpChannelSize = 1024
+	}
+
+	if cfg.RtcpChannelSize <= 0 {
+		cfg.RtcpChannelSize = 64
+	}
+
+	if cfg.ErrChannelSize <= 0 {
+		cfg.ErrChannelSize = 8
+	}
+
 	c := &Client{
 		commandCh: make(chan func(), 3),
 
-		state:       ClientStateInit,
-		path:        fmt.Sprintf("%s://%s%s", url.Scheme, url.Host, url.Path),
-		controlConn: newControlConn(conn, url.User, cfg.ControlMiddlewares),
-		mediaConn:   newMediaConn(url, conn, cfg),
+		state: ClientStateInit,
+		path:  fmt.Sprintf("%s://%s%s", url.Scheme, url.Host, url.Path),
 
-		onRTPPacket: func(media *sdp.MediaDescription, pkt *rtp.Packet) {},
-		onRTPError:  func(err error) {},
+		rtpPackets:  make(chan *rtp.Packet, cfg.RtpChannelSize),
+		rtcpPackets: make(chan *rtcp.Packet, cfg.RtcpChannelSize),
+		err:         make(chan error, cfg.ErrChannelSize),
 	}
 
-	go c.run()
+	conn := connBuilder(func(pkt *rtp.Packet) {
+		c.rtpPackets <- pkt
+	}, func(pkt *rtcp.Packet) {
+		c.rtcpPackets <- pkt
+	}, func(err error) {
+		c.err <- err
+	})
+	c.controlConn = newControlConn(conn, url.User, cfg.ControlMiddlewares)
+
+	c.mediaConn = newMediaConn(url, conn, cfg, func(pkt *rtp.Packet) {
+		c.rtpPackets <- pkt
+	}, func(pkt *rtcp.Packet) {
+		c.rtcpPackets <- pkt
+	}, func(err error) {
+		c.err <- err
+	})
+
+	go func(c *Client) {
+		for cmd := range c.commandCh {
+			cmd()
+		}
+	}(c)
 
 	return c
 }
@@ -129,22 +166,24 @@ func (c *Client) State() ClientState {
 	return c.state
 }
 
-func (c *Client) OnRTPPacket(f func(media *sdp.MediaDescription, pkt *rtp.Packet)) {
-	c.onRTPPacket = f
+func (c *Client) RTPPackets() <-chan *rtp.Packet {
+	return c.rtpPackets
 }
 
-func (c *Client) OnRTCPPacket(f func(media *sdp.MediaDescription, pkt *rtcp.Packet)) {
-	c.onRTCPPacket = f
+func (c *Client) RTCPPackets() <-chan *rtcp.Packet {
+	return c.rtcpPackets
 }
 
-func (c *Client) OnRTPError(f func(err error)) {
-	c.onRTPError = f
+func (c *Client) Errors() <-chan error {
+	return c.err
 }
 
 func (c *Client) Options(ctx context.Context) ([]string, error) {
-	if c.isClosed() {
+	c.stateMu.RLock()
+	if c.closed {
 		return nil, ErrClientClosed
 	}
+	c.stateMu.RUnlock()
 
 	resCh := make(chan optionsResponse, 1)
 	c.commandCh <- func() {
@@ -182,15 +221,16 @@ func (c *Client) Options(ctx context.Context) ([]string, error) {
 	case res := <-resCh:
 		return res.methods, res.err
 	case <-ctx.Done():
-		c.commandCh <- c.close
 		return nil, ctx.Err()
 	}
 }
 
 func (c *Client) Describe(ctx context.Context) (sdp.SessionDescription, error) {
-	if c.isClosed() {
+	c.stateMu.RLock()
+	if c.closed {
 		return sdp.SessionDescription{}, ErrClientClosed
 	}
+	c.stateMu.RUnlock()
 
 	resCh := make(chan describeResponse, 1)
 	c.commandCh <- func() {
@@ -228,15 +268,16 @@ func (c *Client) Describe(ctx context.Context) (sdp.SessionDescription, error) {
 	case res := <-resCh:
 		return res.sdp, res.err
 	case <-ctx.Done():
-		c.commandCh <- c.close
 		return sdp.SessionDescription{}, ctx.Err()
 	}
 }
 
 func (c *Client) Setup(ctx context.Context, media *sdp.MediaDescription) error {
-	if c.isClosed() {
+	c.stateMu.RLock()
+	if c.closed {
 		return ErrClientClosed
 	}
+	c.stateMu.RUnlock()
 
 	resCh := make(chan error, 1)
 	c.commandCh <- func() {
@@ -262,19 +303,7 @@ func (c *Client) Setup(ctx context.Context, media *sdp.MediaDescription) error {
 			control, _ = url.JoinPath(c.path, control)
 		}
 
-		onRTPPacket := func(pkt *rtp.Packet) {
-			c.onRTPPacket(media, pkt)
-		}
-
-		onRTCPPacket := func(pkt *rtcp.Packet) {
-			c.onRTCPPacket(media, pkt)
-		}
-
-		onRTPError := func(err error) {
-			c.onRTPError(err)
-		}
-
-		transport, err := c.mediaConn.OpenMedia(ctx, media.MediaName.String(), onRTPPacket, onRTCPPacket, onRTPError)
+		transport, err := c.mediaConn.OpenMedia(ctx, media.MediaName.String())
 		if err != nil {
 			resCh <- err
 			return
@@ -319,15 +348,16 @@ func (c *Client) Setup(ctx context.Context, media *sdp.MediaDescription) error {
 	case res := <-resCh:
 		return res
 	case <-ctx.Done():
-		c.commandCh <- c.close
 		return ctx.Err()
 	}
 }
 
 func (c *Client) Play(ctx context.Context) error {
-	if c.isClosed() {
+	c.stateMu.RLock()
+	if c.closed {
 		return ErrClientClosed
 	}
+	c.stateMu.RUnlock()
 
 	errCh := make(chan error, 1)
 	c.commandCh <- func() {
@@ -365,21 +395,20 @@ func (c *Client) Play(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
-		c.commandCh <- c.close
 		return ctx.Err()
 	}
 }
 
 func (c *Client) Teardown(ctx context.Context) error {
-	if c.isClosed() {
+	c.stateMu.RLock()
+	if c.closed {
 		return ErrClientClosed
 	}
+	c.stateMu.RUnlock()
 
 	errCh := make(chan error, 1)
 	c.commandCh <- func() {
-		defer c.close()
-
-		_, ok := c.transitionAllowed(methodTeardown)
+		newState, ok := c.transitionAllowed(methodTeardown)
 		if !ok {
 			errCh <- ErrInvalidClientState
 			return
@@ -394,6 +423,10 @@ func (c *Client) Teardown(ctx context.Context) error {
 			HeaderSession: c.session,
 		})
 
+		c.session = ""
+		c.state = newState
+
+		c.err <- ErrClientTeardown
 		errCh <- nil
 	}
 
@@ -405,34 +438,72 @@ func (c *Client) Teardown(ctx context.Context) error {
 	}
 }
 
-func (c *Client) SendRTCP(ctx context.Context, media *sdp.MediaDescription, pkt rtcp.Packet) error {
-	if c.isClosed() {
-		return ErrClientClosed
+func (c *Client) Close(ctx context.Context) error {
+	c.stateMu.RLock()
+	if c.closed {
+		return nil
+	}
+	c.stateMu.RUnlock()
+
+	errCh := make(chan error, 1)
+	c.commandCh <- func() {
+		c.stateMu.Lock()
+		defer c.stateMu.Unlock()
+
+		if c.state != ClientStateInit {
+			c.err <- ErrClientTeardown
+		}
+
+		c.closed = true
+		c.session = ""
+		c.state = ClientStateInit
+
+		controlCloseErr := c.controlConn.Close()
+		mediaCloseErr := c.mediaConn.Close()
+
+		close(c.commandCh)
+		close(c.rtpPackets)
+		close(c.rtcpPackets)
+		close(c.err)
+
+		errCh <- errors.Join(controlCloseErr, mediaCloseErr)
 	}
 
-	resCh := make(chan error, 1)
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *Client) SendRTCP(ctx context.Context, media *sdp.MediaDescription, pkt rtcp.Packet) error {
+	c.stateMu.RLock()
+	if c.closed {
+		return ErrClientClosed
+	}
+	c.stateMu.RUnlock()
+
+	errCh := make(chan error, 1)
 	c.commandCh <- func() {
 		err := c.ensureControlConnReady(ctx)
 		if err != nil {
-			resCh <- err
+			errCh <- err
 		}
 
-		resCh <- c.mediaConn.SendRTCP(ctx, media.MediaName.String(), pkt)
+		errCh <- c.mediaConn.SendRTCP(ctx, media.MediaName.String(), pkt)
 	}
 
-	return <-resCh
-}
-
-func (c *Client) isClosed() bool {
-	return atomic.LoadInt64(&c.closed) == 1
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (c *Client) ensureControlConnReady(ctx context.Context) error {
-	if err := c.controlConn.Open(ctx); !errors.Is(err, ErrConnectionOpened) {
-		return err
-	}
-
-	return nil
+	return c.controlConn.Open(ctx)
 }
 
 func (c *Client) transitionAllowed(method method) (ClientState, bool) {
@@ -442,28 +513,6 @@ func (c *Client) transitionAllowed(method method) (ClientState, bool) {
 	}
 
 	return ClientStateInit, false
-}
-
-func (c *Client) run() {
-	for cmd := range c.commandCh {
-		cmd()
-	}
-}
-
-func (c *Client) close() {
-	if c.isClosed() {
-		return
-	}
-
-	c.closeOnce.Do(func() {
-		c.stateMu.Lock()
-		defer c.stateMu.Unlock()
-
-		atomic.StoreInt64(&c.closed, 1)
-		close(c.commandCh)
-		c.session = ""
-		c.state = ClientStateInit
-	})
 }
 
 type describeResponse struct {
@@ -502,24 +551,28 @@ type conn interface {
 }
 
 type MediaConn interface {
-	OpenMedia(ctx context.Context, mediaType string,
-		onRTPPackage func(pkt *rtp.Packet),
-		onRTCPPackage func(pkt *rtcp.Packet),
-		onRTPError func(err error)) (transport string, err error)
-
+	OpenMedia(ctx context.Context, mediaType string) (string, error)
 	SendRTCP(ctx context.Context, mediaType string, pkt rtcp.Packet) error
 
 	Close() error
 }
 
-func newMediaConn(url *url.URL, conn conn, cfg ClientConfig) MediaConn {
+func newMediaConn(
+	url *url.URL,
+	conn conn,
+	cfg ClientConfig,
+	onRTPPackage func(pkt *rtp.Packet),
+	onRTCPPackage func(pkt *rtcp.Packet),
+	onRTPError func(err error)) MediaConn {
+
 	switch cfg.Transport {
 	case TransportModeTCP:
+
 		return conn
 	case TransportModeAuto, TransportModeUDP:
 		fallthrough
 	default:
-		return newUdpPull(net.ParseIP(url.Host))
+		return newUdpPull(net.ParseIP(url.Host), onRTPPackage, onRTCPPackage, onRTPError)
 	}
 }
 

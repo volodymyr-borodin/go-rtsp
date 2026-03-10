@@ -14,8 +14,6 @@ import (
 )
 
 var (
-	ErrConnectionOpened   = errors.New("connection already opened")
-	ErrConnectionClosed   = errors.New("connection closed")
 	ErrMediaAlreadyExists = errors.New("media already exists")
 	ErrMediaNotFound      = errors.New("media not found")
 )
@@ -34,18 +32,19 @@ type tcpConnection struct {
 
 	rtspResponse chan callResult
 
-	commandCh            chan func()
-	mediaChannel         map[string]int
-	channelOnRTPPackage  map[int]func(pkt *rtp.Packet)
-	channelOnRTCPPackage map[int]func(pkt *rtcp.Packet)
-	channelOnRTPError    map[int]func(err error)
+	commandCh chan func()
+
+	mediaChannel  map[string]int
+	onRTPPackage  func(pkt *rtp.Packet)
+	onRTCPPackage func(pkt *rtcp.Packet)
+	onRTPError    func(err error)
 }
 
-func newTcpConnection(address string) *tcpConnection {
-	return newTcpConnectionWithDialer(address, &net.Dialer{})
+func newTcpConnection(address string, onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt *rtcp.Packet), onRTPError func(err error)) *tcpConnection {
+	return newTcpConnectionWithDialer(address, &net.Dialer{}, onRTPPackage, onRTCPPackage, onRTPError)
 }
 
-func newTcpConnectionWithDialer(address string, d dialer) *tcpConnection {
+func newTcpConnectionWithDialer(address string, d dialer, onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt *rtcp.Packet), onRTPError func(err error)) *tcpConnection {
 	c := &tcpConnection{
 		address: address,
 		dialer:  d,
@@ -53,20 +52,27 @@ func newTcpConnectionWithDialer(address string, d dialer) *tcpConnection {
 		done: make(chan struct{}),
 
 		rtspResponse: make(chan callResult),
+		commandCh:    make(chan func()),
 
-		commandCh:            make(chan func(), 1),
-		mediaChannel:         make(map[string]int),
-		channelOnRTPPackage:  make(map[int]func(pkt *rtp.Packet)),
-		channelOnRTCPPackage: make(map[int]func(pkt *rtcp.Packet)),
-		channelOnRTPError:    make(map[int]func(err error)),
+		mediaChannel: make(map[string]int),
+
+		onRTPPackage:  onRTPPackage,
+		onRTCPPackage: onRTCPPackage,
+		onRTPError:    onRTPError,
 	}
 
 	return c
 }
 
+func (c *tcpConnection) WithCallbacks(onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt *rtcp.Packet), onRTPError func(err error)) {
+	c.onRTPPackage = onRTPPackage
+	c.onRTCPPackage = onRTCPPackage
+	c.onRTPError = onRTPError
+}
+
 func (c *tcpConnection) Open(ctx context.Context) error {
 	if c.conn != nil {
-		return ErrConnectionOpened
+		return nil
 	}
 
 	conn, err := c.dialer.DialContext(ctx, "tcp", c.address)
@@ -78,20 +84,21 @@ func (c *tcpConnection) Open(ctx context.Context) error {
 
 	c.doneWG.Add(1)
 	go c.run()
+	go func(c *tcpConnection) {
+		for cmd := range c.commandCh {
+			cmd()
+		}
+	}(c)
 
 	return nil
 }
 
-func (c *tcpConnection) OpenMedia(ctx context.Context, mediaType string,
-	onRTPPackage func(pkt *rtp.Packet),
-	onRTCPPackage func(pkt *rtcp.Packet),
-	onRTPError func(err error)) (string, error) {
-
+func (c *tcpConnection) OpenMedia(ctx context.Context, mediaType string) (string, error) {
 	resCh := make(chan error)
 
 	c.commandCh <- func() {
 		if c.conn == nil {
-			resCh <- ErrConnectionOpened
+			resCh <- nil
 			return
 		}
 
@@ -101,9 +108,6 @@ func (c *tcpConnection) OpenMedia(ctx context.Context, mediaType string,
 		}
 
 		c.mediaChannel[mediaType] = len(c.mediaChannel) * 2
-		c.channelOnRTPPackage[c.mediaChannel[mediaType]] = onRTPPackage
-		c.channelOnRTCPPackage[c.mediaChannel[mediaType]+1] = onRTCPPackage
-		c.channelOnRTPError[c.mediaChannel[mediaType]] = onRTPError
 		resCh <- nil
 	}
 
@@ -116,7 +120,7 @@ func (c *tcpConnection) OpenMedia(ctx context.Context, mediaType string,
 
 func (c *tcpConnection) DoCall(ctx context.Context, method string, url string, headers map[string]string) (response, error) {
 	if c.conn == nil {
-		return response{}, ErrConnectionClosed
+		return response{}, nil
 	}
 
 	c.commandCh <- func() {
@@ -133,18 +137,6 @@ func (c *tcpConnection) DoCall(ctx context.Context, method string, url string, h
 		}
 	}
 
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = c.conn.SetDeadline(deadline)
-		defer func(conn net.Conn) {
-			_ = conn.SetDeadline(time.Time{})
-		}(c.conn)
-	}
-
-	err := c.send(method, url, headers)
-	if err != nil {
-		return response{}, err
-	}
-
 	select {
 	case res := <-c.rtspResponse:
 		return res.r, res.err
@@ -155,7 +147,7 @@ func (c *tcpConnection) DoCall(ctx context.Context, method string, url string, h
 
 func (c *tcpConnection) SendRTCP(ctx context.Context, mediaType string, pkt rtcp.Packet) error {
 	if c.conn == nil {
-		return ErrConnectionClosed
+		return nil
 	}
 
 	errCh := make(chan error, 1)
@@ -242,7 +234,7 @@ func (c *tcpConnection) run() {
 			lenBytes := make([]byte, 2)
 			_, err := io.ReadFull(reader, lenBytes)
 			if err != nil {
-				c.channelOnRTPError[channel](err)
+				c.onRTPError(err)
 
 				continue
 			}
@@ -252,7 +244,7 @@ func (c *tcpConnection) run() {
 			_, err = io.ReadFull(reader, payload)
 
 			if err != nil {
-				c.channelOnRTPError[channel](err)
+				c.onRTPError(err)
 				continue
 			}
 
@@ -260,20 +252,20 @@ func (c *tcpConnection) run() {
 				var r rtp.Packet
 				err = r.Unmarshal(payload)
 				if err != nil {
-					c.channelOnRTPError[channel](err)
+					c.onRTPError(err)
 					continue
 				}
 
-				c.channelOnRTPPackage[channel](&r)
+				c.onRTPPackage(&r)
 			} else {
 				pkts, err := rtcp.Unmarshal(payload)
 				if err != nil {
-					c.channelOnRTPError[channel](err)
+					c.onRTPError(err)
 					continue
 				}
 
 				for _, pkt := range pkts {
-					c.channelOnRTCPPackage[channel](&pkt)
+					c.onRTCPPackage(&pkt)
 				}
 			}
 		} else {

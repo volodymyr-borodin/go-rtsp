@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/pion/rtp"
 	"net/url"
 	"reflect"
 	"slices"
@@ -12,7 +13,6 @@ import (
 	"time"
 
 	"github.com/pion/rtcp"
-	"github.com/pion/rtp"
 	"github.com/pion/sdp/v3"
 )
 
@@ -146,7 +146,9 @@ func TestClientOptions(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			u, _ := url.Parse(tt.url)
-			c := newClientWithConn(u, tt.conn, ClientConfig{Transport: TransportModeTCP})
+			c := newClientWithConn(u, func(onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt *rtcp.Packet), onRTPError func(err error)) conn {
+				return tt.conn
+			}, ClientConfig{Transport: TransportModeTCP})
 
 			ctx := context.Background()
 			if tt.timeout != 0 {
@@ -175,11 +177,13 @@ func TestClientOptions(t *testing.T) {
 
 func TestClientOptions_OnClosedClient(t *testing.T) {
 	u, _ := url.Parse("rtsp://u1:p1@127.0.0.1:554/stream1")
-	c := newClientWithConn(u, newMockTransport(nil), ClientConfig{Transport: TransportModeTCP})
+	c := newClientWithConn(u, func(onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt *rtcp.Packet), onRTPError func(err error)) conn {
+		return newMockTransport(nil)
+	}, ClientConfig{Transport: TransportModeTCP})
 
-	err := c.Teardown(context.Background())
+	err := c.Close(context.Background())
 	if err != nil {
-		panic(err)
+		t.Errorf("expected no error, got %v", err)
 	}
 
 	_, err = c.Options(context.Background())
@@ -374,7 +378,9 @@ func TestClientDescribe(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			u, _ := url.Parse(tt.url)
-			c := newClientWithConn(u, tt.conn, ClientConfig{Transport: TransportModeTCP})
+			c := newClientWithConn(u, func(onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt *rtcp.Packet), onRTPError func(err error)) conn {
+				return tt.conn
+			}, ClientConfig{Transport: TransportModeTCP})
 
 			ctx := context.Background()
 			if tt.timeout != 0 {
@@ -411,9 +417,11 @@ func TestClientDescribe(t *testing.T) {
 
 func TestClientDescribe_OnClosedClient(t *testing.T) {
 	u, _ := url.Parse("rtsp://u1:p1@127.0.0.1:554/stream1")
-	c := newClientWithConn(u, newMockTransport(nil), ClientConfig{Transport: TransportModeTCP})
+	c := newClientWithConn(u, func(onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt *rtcp.Packet), onRTPError func(err error)) conn {
+		return newMockTransport(nil)
+	}, ClientConfig{Transport: TransportModeTCP})
 
-	err := c.Teardown(context.Background())
+	err := c.Close(context.Background())
 	if err != nil {
 		panic(err)
 	}
@@ -689,7 +697,9 @@ func TestClientSetup(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			u, _ := url.Parse(tt.url)
-			c := newClientWithConn(u, tt.conn, ClientConfig{Transport: TransportModeTCP})
+			c := newClientWithConn(u, func(onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt *rtcp.Packet), onRTPError func(err error)) conn {
+				return tt.conn
+			}, ClientConfig{Transport: TransportModeTCP})
 			s, err := c.Describe(context.Background())
 			if err != nil {
 				t.Fatal(err)
@@ -727,9 +737,11 @@ func TestClientSetup(t *testing.T) {
 
 func TestClientSetup_OnClosedClient(t *testing.T) {
 	u, _ := url.Parse("rtsp://127.0.0.1:554/stream1")
-	c := newClientWithConn(u, newMockTransport(nil), ClientConfig{Transport: TransportModeTCP})
+	c := newClientWithConn(u, func(onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt *rtcp.Packet), onRTPError func(err error)) conn {
+		return newMockTransport(nil)
+	}, ClientConfig{Transport: TransportModeTCP})
 
-	err := c.Teardown(context.Background())
+	err := c.Close(context.Background())
 	if err != nil {
 		panic(err)
 	}
@@ -852,14 +864,15 @@ func TestClientPlay(t *testing.T) {
 			url: "rtsp://127.0.0.1:554/stream1",
 			conn: newMockTransport([]transportSequence{
 				{
-					method: "PLAY",
+					method: "DESCRIBE",
 					url:    "rtsp://127.0.0.1:554/stream1",
 					headers: map[string]string{
-						HeaderCSeq:    "0",
-						HeaderSession: "Session1",
+						HeaderCSeq:   "0",
+						HeaderAccept: ContentTypeSDP,
 					},
 					resp: response{
-						StatusCode: 400,
+						StatusCode: 200,
+						Body:       []byte("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=-\nt=0 0\nm=video 0 RTP/AVP 96\na=control:track1\na=rtpmap:96 H264/90000\n"),
 					},
 				},
 			}),
@@ -965,8 +978,14 @@ func TestClientPlay(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			u, _ := url.Parse(tt.url)
-			c := newClientWithConn(u, tt.conn, ClientConfig{Transport: TransportModeTCP})
-			s, _ := c.Describe(context.Background())
+			c := newClientWithConn(u, func(onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt *rtcp.Packet), onRTPError func(err error)) conn {
+				return tt.conn
+			}, ClientConfig{Transport: TransportModeTCP})
+
+			s, err := c.Describe(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
 			if len(s.MediaDescriptions) != 0 {
 				_ = c.Setup(context.Background(), s.MediaDescriptions[0])
 			}
@@ -978,7 +997,7 @@ func TestClientPlay(t *testing.T) {
 				defer cancel()
 			}
 
-			err := c.Play(ctx)
+			err = c.Play(ctx)
 			if tt.expectedError != nil {
 				if !errors.Is(err, tt.expectedError) {
 					t.Errorf("expected error %v, got %v", tt.expectedError, err)
@@ -998,11 +1017,13 @@ func TestClientPlay(t *testing.T) {
 
 func TestClientPlay_OnClosedClient(t *testing.T) {
 	u, _ := url.Parse("rtsp://127.0.0.1:554/stream1")
-	c := newClientWithConn(u, newMockTransport(nil), ClientConfig{Transport: TransportModeTCP})
+	c := newClientWithConn(u, func(onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt *rtcp.Packet), onRTPError func(err error)) conn {
+		return newMockTransport(nil)
+	}, ClientConfig{Transport: TransportModeTCP})
 
-	err := c.Teardown(context.Background())
+	err := c.Close(context.Background())
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 
 	err = c.Play(context.Background())
@@ -1149,7 +1170,9 @@ func TestClientTeardown(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			u, _ := url.Parse(tt.url)
-			c := newClientWithConn(u, tt.conn, ClientConfig{Transport: TransportModeTCP})
+			c := newClientWithConn(u, func(onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt *rtcp.Packet), onRTPError func(err error)) conn {
+				return tt.conn
+			}, ClientConfig{Transport: TransportModeTCP})
 			s, _ := c.Describe(context.Background())
 			_ = c.Setup(context.Background(), s.MediaDescriptions[0])
 
@@ -1223,17 +1246,14 @@ func (m *mockTransport) Open(ctx context.Context) error {
 	m.openedMu.Lock()
 	defer m.openedMu.Unlock()
 	if m.opened {
-		return ErrConnectionOpened
+		return nil
 	}
 
 	m.opened = true
 	return nil
 }
 
-func (m *mockTransport) OpenMedia(ctx context.Context, media string,
-	onRTPPacket func(pkt *rtp.Packet),
-	onRTCPPacket func(pkt *rtcp.Packet),
-	onRTPError func(err error)) (string, error) {
+func (m *mockTransport) OpenMedia(ctx context.Context, media string) (string, error) {
 	m.mediaChannel[media] = len(m.mediaChannel) * 2
 	return fmt.Sprintf("RTP/AVP/TCP;unicast;interleaved=%d-%d", m.mediaChannel[media], m.mediaChannel[media]+1), nil
 }
@@ -1278,7 +1298,7 @@ func (m *mockTransport) Close() error {
 	m.openedMu.Lock()
 	defer m.openedMu.Unlock()
 	if !m.opened {
-		return ErrConnectionClosed
+		return nil
 	}
 
 	m.opened = false

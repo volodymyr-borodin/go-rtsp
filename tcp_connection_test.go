@@ -15,7 +15,7 @@ import (
 )
 
 func TestTcpConnectionOpen_DialContextFailed(t *testing.T) {
-	conn := newTcpConnectionWithDialer("", newErrMockNetDialer(errTransport))
+	conn := newTcpConnectionWithDialer("", newErrMockNetDialer(errTransport), nil, nil, nil)
 
 	err := conn.Open(context.Background())
 	if !errors.Is(err, errTransport) {
@@ -24,7 +24,7 @@ func TestTcpConnectionOpen_DialContextFailed(t *testing.T) {
 }
 
 func TestTcpConnectionOpen_ConnectionAlreadyOpened(t *testing.T) {
-	conn := newTcpConnectionWithDialer("", newMockNetDialer(newMockNetConn(make([]byte, 0), make([]byte, 0), 0)))
+	conn := newTcpConnectionWithDialer("", newMockNetDialer(newMockNetConn(make([]byte, 0), make([]byte, 0), 0)), nil, nil, nil)
 
 	err := conn.Open(context.Background())
 	if err != nil {
@@ -32,24 +32,19 @@ func TestTcpConnectionOpen_ConnectionAlreadyOpened(t *testing.T) {
 	}
 
 	err = conn.Open(context.Background())
-	if err == nil {
-		t.Fatal("expected error, got none")
-	}
-
-	if !errors.Is(err, ErrConnectionOpened) {
-		t.Fatalf("expected error %s, got %s", ErrConnectionOpened, err)
+	if err != nil {
+		t.Fatalf("expected no error, got %s", err)
 	}
 }
 
 func TestTcpConnectionOpenMedia_TracksMedia(t *testing.T) {
-	conn := newTcpConnectionWithDialer("", newMockNetDialer(newMockNetConn(make([]byte, 0), make([]byte, 0), 0)))
+	conn := newTcpConnectionWithDialer("", newMockNetDialer(newMockNetConn(make([]byte, 0), make([]byte, 0), 0)), nil, nil, nil)
 	err := conn.Open(context.Background())
 	if err != nil {
 		t.Fatalf("%v", err)
 	}
 
-	transport, err := conn.OpenMedia(context.Background(), "media1",
-		func(pkt *rtp.Packet) {}, func(pkt *rtcp.Packet) {}, func(err error) {})
+	transport, err := conn.OpenMedia(context.Background(), "media1")
 	if err != nil {
 		t.Fatalf("%v", err)
 	}
@@ -58,8 +53,7 @@ func TestTcpConnectionOpenMedia_TracksMedia(t *testing.T) {
 		t.Fatalf("transport: %s", transport)
 	}
 
-	transport2, err := conn.OpenMedia(context.Background(), "media2",
-		func(pkt *rtp.Packet) {}, func(pkt *rtcp.Packet) {}, func(err error) {})
+	transport2, err := conn.OpenMedia(context.Background(), "media2")
 	if err != nil {
 		t.Fatalf("%v", err)
 	}
@@ -70,14 +64,13 @@ func TestTcpConnectionOpenMedia_TracksMedia(t *testing.T) {
 }
 
 func TestTcpConnectionOpenMedia_MediaDuplicated(t *testing.T) {
-	conn := newTcpConnectionWithDialer("", newMockNetDialer(newMockNetConn(make([]byte, 0), make([]byte, 0), 0)))
+	conn := newTcpConnectionWithDialer("", newMockNetDialer(newMockNetConn(make([]byte, 0), make([]byte, 0), 0)), nil, nil, nil)
 	err := conn.Open(context.Background())
 	if err != nil {
 		t.Fatalf("%v", err)
 	}
 
-	transport, err := conn.OpenMedia(context.Background(), "media1",
-		func(pkt *rtp.Packet) {}, func(pkt *rtcp.Packet) {}, func(err error) {})
+	transport, err := conn.OpenMedia(context.Background(), "media1")
 	if err != nil {
 		t.Fatalf("%v", err)
 	}
@@ -86,8 +79,7 @@ func TestTcpConnectionOpenMedia_MediaDuplicated(t *testing.T) {
 		t.Fatalf("transport: %s", transport)
 	}
 
-	transport, err = conn.OpenMedia(context.Background(), "media1",
-		func(pkt *rtp.Packet) {}, func(pkt *rtcp.Packet) {}, func(err error) {})
+	transport, err = conn.OpenMedia(context.Background(), "media1")
 	if !errors.Is(err, ErrMediaAlreadyExists) {
 		t.Fatalf("%v", err)
 	}
@@ -144,7 +136,7 @@ func TestTcpConnectionDoCall(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			conn := newTcpConnectionWithDialer("", newMockNetDialer(tt.conn))
+			conn := newTcpConnectionWithDialer("", newMockNetDialer(tt.conn), nil, nil, nil)
 			err := conn.Open(context.Background())
 			if err != nil {
 				t.Fatalf("%v", err)
@@ -226,16 +218,9 @@ func TestTcpConnectionOnRTPPacket(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			conn := newTcpConnectionWithDialer("", newMockNetDialer(tt.conn))
-
-			err := conn.Open(context.Background())
-			if err != nil {
-				t.Fatalf("%v", err)
-			}
-
 			ch := make(chan *rtp.Packet)
 			chErr := make(chan error)
-			_, err = conn.OpenMedia(context.Background(), "media1",
+			conn := newTcpConnectionWithDialer("", newMockNetDialer(tt.conn),
 				func(p *rtp.Packet) {
 					ch <- p
 				},
@@ -243,6 +228,13 @@ func TestTcpConnectionOnRTPPacket(t *testing.T) {
 				func(err error) {
 					chErr <- err
 				})
+
+			err := conn.Open(context.Background())
+			if err != nil {
+				t.Fatalf("%v", err)
+			}
+
+			_, err = conn.OpenMedia(context.Background(), "media1")
 
 			if err != nil {
 				t.Fatalf("%v", err)
@@ -285,16 +277,16 @@ func TestTcpConnectionSendRTCP(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			conn := newTcpConnectionWithDialer("", newMockNetDialer(tt.conn))
+			conn := newTcpConnectionWithDialer("", newMockNetDialer(tt.conn),
+				func(p *rtp.Packet) {},
+				func(p *rtcp.Packet) {},
+				func(err error) {})
 			err := conn.Open(context.Background())
 			if err != nil {
 				t.Fatalf("%v", err)
 			}
 
-			_, err = conn.OpenMedia(context.Background(), "media1",
-				func(p *rtp.Packet) {},
-				func(p *rtcp.Packet) {},
-				func(err error) {})
+			_, err = conn.OpenMedia(context.Background(), "media1")
 			if err != nil {
 				t.Fatalf("%v", err)
 			}
@@ -312,7 +304,10 @@ func TestTcpConnectionSendRTCP(t *testing.T) {
 }
 
 func TestTcpConnectionSendRTCP_NoMediaSetup(t *testing.T) {
-	conn := newTcpConnectionWithDialer("", newMockNetDialer(newMockNetConn(make([]byte, 0), make([]byte, 0), 0)))
+	conn := newTcpConnectionWithDialer("", newMockNetDialer(newMockNetConn(make([]byte, 0), make([]byte, 0), 0)),
+		func(p *rtp.Packet) {},
+		func(p *rtcp.Packet) {},
+		func(err error) {})
 	err := conn.Open(context.Background())
 	if err != nil {
 		t.Fatalf("%v", err)
@@ -325,10 +320,13 @@ func TestTcpConnectionSendRTCP_NoMediaSetup(t *testing.T) {
 }
 
 func TestTcpConnectionSendRTCP_ConnectionClosed(t *testing.T) {
-	conn := newTcpConnectionWithDialer("", newMockNetDialer(newMockNetConn(make([]byte, 0), make([]byte, 0), 0)))
+	conn := newTcpConnectionWithDialer("", newMockNetDialer(newMockNetConn(make([]byte, 0), make([]byte, 0), 0)),
+		func(p *rtp.Packet) {},
+		func(p *rtcp.Packet) {},
+		func(err error) {})
 
 	err := conn.SendRTCP(context.Background(), "media1", &rtcp.PictureLossIndication{})
-	if !errors.Is(err, ErrConnectionClosed) {
+	if err != nil {
 		t.Fatalf("%v", err)
 	}
 }
@@ -336,7 +334,10 @@ func TestTcpConnectionSendRTCP_ConnectionClosed(t *testing.T) {
 func TestTcpConnectionClose_Opened(t *testing.T) {
 	conn := newTcpConnectionWithDialer("", newMockNetDialer(newMockNetConn(
 		[]byte("DESCRIBE rtsp://1.1.1.1:554/stream1 RTSP/1.0\r\nreqh1: reqv1\r\n\r\n"),
-		[]byte("RTSP/1.0 200 OK\r\nresh1: resv1\r\n\r\n"), 0)))
+		[]byte("RTSP/1.0 200 OK\r\nresh1: resv1\r\n\r\n"), 0)),
+		func(p *rtp.Packet) {},
+		func(p *rtcp.Packet) {},
+		func(err error) {})
 
 	err := conn.Open(context.Background())
 	if err != nil {
@@ -350,7 +351,10 @@ func TestTcpConnectionClose_Opened(t *testing.T) {
 }
 
 func TestTcpConnectionClose_Closed(t *testing.T) {
-	conn := newTcpConnectionWithDialer("", newMockNetDialer(newMockNetConn(make([]byte, 0), make([]byte, 0), 0)))
+	conn := newTcpConnectionWithDialer("", newMockNetDialer(newMockNetConn(make([]byte, 0), make([]byte, 0), 0)),
+		func(p *rtp.Packet) {},
+		func(p *rtcp.Packet) {},
+		func(err error) {})
 
 	err := conn.Close()
 	if err != nil {

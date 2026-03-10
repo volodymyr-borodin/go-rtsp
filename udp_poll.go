@@ -19,26 +19,31 @@ type udpPull struct {
 	connections map[string]*udpConnection
 
 	mutex sync.Mutex
+
+	onRTPPackage  func(pkt *rtp.Packet)
+	onRTCPPackage func(pkt *rtcp.Packet)
+	onRTPError    func(err error)
 }
 
-func newUdpPull(ip net.IP) *udpPull {
+func newUdpPull(ip net.IP, onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt *rtcp.Packet), onRTPError func(err error)) *udpPull {
 	return &udpPull{
 		ip:          ip,
 		connections: make(map[string]*udpConnection),
+
+		onRTPPackage:  onRTPPackage,
+		onRTCPPackage: onRTCPPackage,
+		onRTPError:    onRTPError,
 	}
 }
 
-func (u *udpPull) OpenMedia(ctx context.Context, mediaType string,
-	onRTPPackage func(pkt *rtp.Packet),
-	onRTCPPackage func(pkt *rtcp.Packet),
-	onRTPError func(err error)) (header string, err error) {
+func (u *udpPull) OpenMedia(ctx context.Context, mediaType string) (header string, err error) {
 	u.mutex.Lock()
 	defer u.mutex.Unlock()
 
-	c := newUdpConnection(u.ip)
-	c.OnRTPPacket(onRTPPackage)
-	c.OnRTCPPacket(onRTCPPackage)
-	c.OnRTPError(onRTPError)
+	c := newUdpConnection(u.ip, u.onRTPPackage, u.onRTCPPackage, u.onRTPError)
+	c.OnRTPPacket(u.onRTPPackage)
+	c.OnRTCPPacket(u.onRTCPPackage)
+	c.OnRTPError(u.onRTPError)
 
 	err = c.Open(ctx)
 	if err != nil {

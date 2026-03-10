@@ -27,14 +27,21 @@ type udpConnection struct {
 	onRTPError    func(err error)
 }
 
-func newUdpConnection(ip net.IP) *udpConnection {
-	return newUdpConnectionWithDialer(ip, &udpBinderImpl{})
+func newUdpConnection(ip net.IP, onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt *rtcp.Packet), onRTPError func(err error)) *udpConnection {
+	return newUdpConnectionWithDialer(ip, onRTPPackage, onRTCPPackage, onRTPError, &udpBinderImpl{})
 }
 
-func newUdpConnectionWithDialer(ip net.IP, binder udpBinder) *udpConnection {
+func newUdpConnectionWithDialer(ip net.IP, onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt *rtcp.Packet), onRTPError func(err error), binder udpBinder) *udpConnection {
 	return &udpConnection{
 		ip:     ip,
 		binder: binder,
+
+		rtpDone:  make(chan struct{}),
+		rtcpDone: make(chan struct{}),
+
+		onRTPPackage:  onRTPPackage,
+		onRTCPPackage: onRTCPPackage,
+		onRTPError:    onRTPError,
 	}
 }
 
