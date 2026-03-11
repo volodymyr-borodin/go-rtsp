@@ -212,8 +212,6 @@ func (c *tcpConnection) run() {
 			_ = c.conn.Close()
 			c.conn = nil
 			return
-		case cmd := <-c.commandCh:
-			cmd()
 		default:
 		}
 

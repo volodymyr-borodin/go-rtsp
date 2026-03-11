@@ -111,23 +111,24 @@ func (c *udpConnection) OnRTPError(f func(err error)) {
 }
 
 func (c *udpConnection) Close() error {
-	close(c.rtpDone)
-	c.rtpDoneWG.Wait()
-
 	var rtpErr error
 	if c.rtpConn != nil {
 		rtpErr = c.rtpConn.Close()
-		c.rtpConn = nil
 	}
-
-	close(c.rtcpDone)
-	c.rtcpDoneWG.Wait()
 
 	var rtcpErr error
 	if c.rtcpConn != nil {
 		rtcpErr = c.rtcpConn.Close()
-		c.rtcpConn = nil
 	}
+
+	close(c.rtpDone)
+	c.rtpDoneWG.Wait()
+
+	close(c.rtcpDone)
+	c.rtcpDoneWG.Wait()
+
+	c.rtpConn = nil
+	c.rtcpConn = nil
 
 	return errors.Join(rtpErr, rtcpErr)
 }
