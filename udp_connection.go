@@ -19,8 +19,8 @@ type udpConnection struct {
 	rtcpDone   chan struct{}
 	rtcpDoneWG sync.WaitGroup
 
-	rtpConn  *net.UDPConn
-	rtcpConn *net.UDPConn
+	rtpConn  udpReader
+	rtcpConn udpReader
 
 	onRTPPackage  func(pkt *rtp.Packet)
 	onRTCPPackage func(pkt rtcp.Packet)
@@ -70,7 +70,7 @@ func (c *udpConnection) RTCPPort() int {
 	return c.rtcpConn.LocalAddr().(*net.UDPAddr).Port
 }
 
-func (c *udpConnection) allocateRTPRTCPPair() (rtpConn *net.UDPConn, rtcpConn *net.UDPConn, err error) {
+func (c *udpConnection) allocateRTPRTCPPair() (rtpConn udpReader, rtcpConn udpReader, err error) {
 	// TODO: try to allocate until success
 	conn1, err := c.binder.ListenUDP(&net.UDPAddr{
 		IP:   c.ip,
@@ -146,8 +146,13 @@ func (c *udpConnection) readRTP() {
 
 		n, _, err := c.rtpConn.ReadFromUDP(buf)
 		if err != nil {
+			var opError *net.OpError
+			if errors.As(err, &opError) {
+				return
+			}
+
 			c.onRTPError(err)
-			return
+			continue
 		}
 
 		var pkt rtp.Packet
@@ -173,8 +178,13 @@ func (c *udpConnection) readRTCP() {
 
 		n, _, err := c.rtcpConn.ReadFromUDP(buf)
 		if err != nil {
+			var opError *net.OpError
+			if errors.As(err, &opError) {
+				return
+			}
+
 			c.onRTPError(err)
-			return
+			continue
 		}
 
 		pkts, err := rtcp.Unmarshal(buf[:n])
@@ -190,11 +200,17 @@ func (c *udpConnection) readRTCP() {
 }
 
 type udpBinder interface {
-	ListenUDP(laddr *net.UDPAddr) (*net.UDPConn, error)
+	ListenUDP(laddr *net.UDPAddr) (udpReader, error)
+}
+
+type udpReader interface {
+	LocalAddr() net.Addr
+	ReadFromUDP(b []byte) (int, *net.UDPAddr, error)
+	Close() error
 }
 
 type udpBinderImpl struct{}
 
-func (u udpBinderImpl) ListenUDP(laddr *net.UDPAddr) (*net.UDPConn, error) {
+func (u udpBinderImpl) ListenUDP(laddr *net.UDPAddr) (udpReader, error) {
 	return net.ListenUDP("udp", laddr)
 }
