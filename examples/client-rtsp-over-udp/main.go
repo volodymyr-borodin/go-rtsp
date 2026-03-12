@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/synapti-co/go-rtsp"
+	"github.com/volodymyr-borodin/go-rtsp"
 	"log/slog"
 	"net/url"
 	"os"

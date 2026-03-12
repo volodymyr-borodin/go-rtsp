@@ -1,4 +1,4 @@
-module github.com/synapti-co/go-rtsp
+module github.com/volodymyr-borodin/go-rtsp
 
 go 1.25.5
 
