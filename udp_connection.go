@@ -23,15 +23,15 @@ type udpConnection struct {
 	rtcpConn *net.UDPConn
 
 	onRTPPackage  func(pkt *rtp.Packet)
-	onRTCPPackage func(pkt *rtcp.Packet)
+	onRTCPPackage func(pkt rtcp.Packet)
 	onRTPError    func(err error)
 }
 
-func newUdpConnection(ip net.IP, onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt *rtcp.Packet), onRTPError func(err error)) *udpConnection {
+func newUdpConnection(ip net.IP, onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt rtcp.Packet), onRTPError func(err error)) *udpConnection {
 	return newUdpConnectionWithDialer(ip, onRTPPackage, onRTCPPackage, onRTPError, &udpBinderImpl{})
 }
 
-func newUdpConnectionWithDialer(ip net.IP, onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt *rtcp.Packet), onRTPError func(err error), binder udpBinder) *udpConnection {
+func newUdpConnectionWithDialer(ip net.IP, onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt rtcp.Packet), onRTPError func(err error), binder udpBinder) *udpConnection {
 	return &udpConnection{
 		ip:     ip,
 		binder: binder,
@@ -102,7 +102,7 @@ func (c *udpConnection) OnRTPPacket(f func(pkt *rtp.Packet)) {
 	c.onRTPPackage = f
 }
 
-func (c *udpConnection) OnRTCPPacket(f func(pkt *rtcp.Packet)) {
+func (c *udpConnection) OnRTCPPacket(f func(pkt rtcp.Packet)) {
 	c.onRTCPPackage = f
 }
 
@@ -184,7 +184,7 @@ func (c *udpConnection) readRTCP() {
 		}
 
 		for _, pkt := range pkts {
-			c.onRTCPPackage(&pkt)
+			c.onRTCPPackage(pkt)
 		}
 	}
 }

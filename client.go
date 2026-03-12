@@ -87,7 +87,7 @@ type Client struct {
 	mediaConn   MediaConn
 
 	rtpPackets  chan *rtp.Packet
-	rtcpPackets chan *rtcp.Packet
+	rtcpPackets chan rtcp.Packet
 	err         chan error
 }
 
@@ -97,12 +97,12 @@ func NewClient(url *url.URL, opts ...ClientOption) (*Client, error) {
 		opt(&cfg)
 	}
 
-	return newClientWithConn(url, func(onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt *rtcp.Packet), onRTPError func(err error)) conn {
+	return newClientWithConn(url, func(onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt rtcp.Packet), onRTPError func(err error)) conn {
 		return newTcpConnection(url.Host, onRTPPackage, onRTCPPackage, onRTPError)
 	}, cfg), nil
 }
 
-func newClientWithConn(url *url.URL, connBuilder func(onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt *rtcp.Packet), onRTPError func(err error)) conn, cfg ClientConfig) *Client {
+func newClientWithConn(url *url.URL, connBuilder func(onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt rtcp.Packet), onRTPError func(err error)) conn, cfg ClientConfig) *Client {
 	if cfg.RtpChannelSize <= 0 {
 		cfg.RtpChannelSize = 1024
 	}
@@ -122,13 +122,13 @@ func newClientWithConn(url *url.URL, connBuilder func(onRTPPackage func(pkt *rtp
 		path:  fmt.Sprintf("%s://%s%s", url.Scheme, url.Host, url.Path),
 
 		rtpPackets:  make(chan *rtp.Packet, cfg.RtpChannelSize),
-		rtcpPackets: make(chan *rtcp.Packet, cfg.RtcpChannelSize),
+		rtcpPackets: make(chan rtcp.Packet, cfg.RtcpChannelSize),
 		err:         make(chan error, cfg.ErrChannelSize),
 	}
 
 	conn := connBuilder(func(pkt *rtp.Packet) {
 		c.rtpPackets <- pkt
-	}, func(pkt *rtcp.Packet) {
+	}, func(pkt rtcp.Packet) {
 		c.rtcpPackets <- pkt
 	}, func(err error) {
 		c.err <- err
@@ -137,7 +137,7 @@ func newClientWithConn(url *url.URL, connBuilder func(onRTPPackage func(pkt *rtp
 
 	c.mediaConn = newMediaConn(url, conn, cfg, func(pkt *rtp.Packet) {
 		c.rtpPackets <- pkt
-	}, func(pkt *rtcp.Packet) {
+	}, func(pkt rtcp.Packet) {
 		c.rtcpPackets <- pkt
 	}, func(err error) {
 		c.err <- err
@@ -170,7 +170,7 @@ func (c *Client) RTPPackets() <-chan *rtp.Packet {
 	return c.rtpPackets
 }
 
-func (c *Client) RTCPPackets() <-chan *rtcp.Packet {
+func (c *Client) RTCPPackets() <-chan rtcp.Packet {
 	return c.rtcpPackets
 }
 
@@ -562,7 +562,7 @@ func newMediaConn(
 	conn conn,
 	cfg ClientConfig,
 	onRTPPackage func(pkt *rtp.Packet),
-	onRTCPPackage func(pkt *rtcp.Packet),
+	onRTCPPackage func(pkt rtcp.Packet),
 	onRTPError func(err error)) MediaConn {
 
 	switch cfg.Transport {

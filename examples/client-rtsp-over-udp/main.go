@@ -73,7 +73,7 @@ func main() {
 				slog.Int("ssrc", int(p.SSRC)))
 		case p := <-client.RTCPPackets():
 			slog.Info("RTCP packet received",
-				slog.String("pkg", fmt.Sprintf("%+v", *p)))
+				slog.String("pkg", fmt.Sprintf("%+v", p)))
 		case e := <-client.Errors():
 			if errors.Is(e, rtsp.ErrClientTeardown) {
 				return

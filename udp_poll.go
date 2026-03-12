@@ -21,11 +21,11 @@ type udpPull struct {
 	mutex sync.Mutex
 
 	onRTPPackage  func(pkt *rtp.Packet)
-	onRTCPPackage func(pkt *rtcp.Packet)
+	onRTCPPackage func(pkt rtcp.Packet)
 	onRTPError    func(err error)
 }
 
-func newUdpPull(ip net.IP, onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt *rtcp.Packet), onRTPError func(err error)) *udpPull {
+func newUdpPull(ip net.IP, onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt rtcp.Packet), onRTPError func(err error)) *udpPull {
 	return &udpPull{
 		ip:          ip,
 		connections: make(map[string]*udpConnection),

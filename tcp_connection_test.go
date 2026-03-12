@@ -197,20 +197,20 @@ func TestTcpConnectionOnRTPPacket(t *testing.T) {
 		{
 			name: "RTP packet received",
 
-			conn:              newMockReadWriteCloserRTP(append([]byte{'$', 0, 0, byte(len(pktByte))}, pktByte...)),
+			conn:              newMockReadWriteCloserReadBuf(append([]byte{'$', 0, 0, byte(len(pktByte))}, pktByte...)),
 			expectedRTPPacket: pkt,
 		},
 		{
 			name: "partial body RTP packet received",
 
-			conn:              newMockReadWriteCloserRTP(append([]byte{'$', 0, 0, byte(len(pktByte))}, pktByte[:8]...)),
+			conn:              newMockReadWriteCloserReadBuf(append([]byte{'$', 0, 0, byte(len(pktByte))}, pktByte[:8]...)),
 			expectedRTPPacket: nil,
 			expectedError:     io.ErrUnexpectedEOF,
 		},
 		{
 			name: "partial length RTP packet received",
 
-			conn:              newMockReadWriteCloserRTP([]byte{'$', 0}),
+			conn:              newMockReadWriteCloserReadBuf([]byte{'$', 0}),
 			expectedRTPPacket: nil,
 			expectedError:     io.EOF,
 		},
@@ -224,7 +224,7 @@ func TestTcpConnectionOnRTPPacket(t *testing.T) {
 				func(p *rtp.Packet) {
 					ch <- p
 				},
-				func(p *rtcp.Packet) {},
+				func(p rtcp.Packet) {},
 				func(err error) {
 					chErr <- err
 				})
@@ -244,6 +244,80 @@ func TestTcpConnectionOnRTPPacket(t *testing.T) {
 			case p := <-ch:
 				if !reflect.DeepEqual(p, tt.expectedRTPPacket) {
 					t.Fatalf("expected: %v, got: %v", tt.expectedRTPPacket, p)
+				}
+			case err := <-chErr:
+				if !errors.Is(err, tt.expectedError) {
+					t.Fatalf("expected: %v, got: %v", tt.expectedError, err)
+				}
+			case <-time.After(time.Second):
+				t.Fatalf("timeout")
+			}
+		})
+	}
+}
+
+func TestTcpConnectionOnRTCPPacket(t *testing.T) {
+
+	pkt := &rtcp.PictureLossIndication{}
+	pktByte, _ := pkt.Marshal()
+
+	tests := []struct {
+		name string
+
+		conn               net.Conn
+		expectedRTCPPacket rtcp.Packet
+		expectedError      error
+	}{
+		{
+			name: "received",
+
+			conn:               newMockReadWriteCloserReadBuf(append([]byte{'$', 1, 0, byte(len(pktByte))}, pktByte...)),
+			expectedRTCPPacket: pkt,
+		},
+		{
+			name: "partial received",
+
+			conn:               newMockReadWriteCloserReadBuf(append([]byte{'$', 1, 0, byte(len(pktByte))}, pktByte[:8]...)),
+			expectedRTCPPacket: nil,
+			expectedError:      io.ErrUnexpectedEOF,
+		},
+		{
+			name: "partial length received",
+
+			conn:               newMockReadWriteCloserReadBuf([]byte{'$', 1}),
+			expectedRTCPPacket: nil,
+			expectedError:      io.EOF,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ch := make(chan rtcp.Packet)
+			chErr := make(chan error)
+			conn := newTcpConnectionWithDialer("", newMockNetDialer(tt.conn),
+				func(p *rtp.Packet) {},
+				func(p rtcp.Packet) {
+					ch <- p
+				},
+				func(err error) {
+					chErr <- err
+				})
+
+			err := conn.Open(context.Background())
+			if err != nil {
+				t.Fatalf("%v", err)
+			}
+
+			_, err = conn.OpenMedia(context.Background(), "media1")
+
+			if err != nil {
+				t.Fatalf("%v", err)
+			}
+
+			select {
+			case p := <-ch:
+				if !reflect.DeepEqual(p, tt.expectedRTCPPacket) {
+					t.Fatalf("expected: %v, got: %v", tt.expectedRTCPPacket, p)
 				}
 			case err := <-chErr:
 				if !errors.Is(err, tt.expectedError) {
@@ -279,7 +353,7 @@ func TestTcpConnectionSendRTCP(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			conn := newTcpConnectionWithDialer("", newMockNetDialer(tt.conn),
 				func(p *rtp.Packet) {},
-				func(p *rtcp.Packet) {},
+				func(p rtcp.Packet) {},
 				func(err error) {})
 			err := conn.Open(context.Background())
 			if err != nil {
@@ -306,7 +380,7 @@ func TestTcpConnectionSendRTCP(t *testing.T) {
 func TestTcpConnectionSendRTCP_NoMediaSetup(t *testing.T) {
 	conn := newTcpConnectionWithDialer("", newMockNetDialer(newMockNetConn(make([]byte, 0), make([]byte, 0), 0)),
 		func(p *rtp.Packet) {},
-		func(p *rtcp.Packet) {},
+		func(p rtcp.Packet) {},
 		func(err error) {})
 	err := conn.Open(context.Background())
 	if err != nil {
@@ -322,7 +396,7 @@ func TestTcpConnectionSendRTCP_NoMediaSetup(t *testing.T) {
 func TestTcpConnectionSendRTCP_ConnectionClosed(t *testing.T) {
 	conn := newTcpConnectionWithDialer("", newMockNetDialer(newMockNetConn(make([]byte, 0), make([]byte, 0), 0)),
 		func(p *rtp.Packet) {},
-		func(p *rtcp.Packet) {},
+		func(p rtcp.Packet) {},
 		func(err error) {})
 
 	err := conn.SendRTCP(context.Background(), "media1", &rtcp.PictureLossIndication{})
@@ -336,7 +410,7 @@ func TestTcpConnectionClose_Opened(t *testing.T) {
 		[]byte("DESCRIBE rtsp://1.1.1.1:554/stream1 RTSP/1.0\r\nreqh1: reqv1\r\n\r\n"),
 		[]byte("RTSP/1.0 200 OK\r\nresh1: resv1\r\n\r\n"), 0)),
 		func(p *rtp.Packet) {},
-		func(p *rtcp.Packet) {},
+		func(p rtcp.Packet) {},
 		func(err error) {})
 
 	err := conn.Open(context.Background())
@@ -348,15 +422,36 @@ func TestTcpConnectionClose_Opened(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v", err)
 	}
+
+	if conn.conn != nil {
+		t.Fatalf("conn should be closed")
+	}
 }
 
 func TestTcpConnectionClose_Closed(t *testing.T) {
 	conn := newTcpConnectionWithDialer("", newMockNetDialer(newMockNetConn(make([]byte, 0), make([]byte, 0), 0)),
 		func(p *rtp.Packet) {},
-		func(p *rtcp.Packet) {},
+		func(p rtcp.Packet) {},
 		func(err error) {})
 
 	err := conn.Close()
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestTcpConnectionClose_DoubleClosed(t *testing.T) {
+	conn := newTcpConnectionWithDialer("", newMockNetDialer(newMockNetConn(make([]byte, 0), make([]byte, 0), 0)),
+		func(p *rtp.Packet) {},
+		func(p rtcp.Packet) {},
+		func(err error) {})
+
+	err := conn.Close()
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+
+	err = conn.Close()
 	if err != nil {
 		t.Fatalf("%v", err)
 	}
@@ -414,7 +509,7 @@ func newMockNetConn(expectedWrite, response []byte, delay time.Duration) *mockNe
 	}
 }
 
-func newMockReadWriteCloserRTP(response []byte) *mockNetConn {
+func newMockReadWriteCloserReadBuf(response []byte) *mockNetConn {
 	return &mockNetConn{
 		readBuf:       bytes.NewBuffer(response),
 		writeBuf:      &bytes.Buffer{},

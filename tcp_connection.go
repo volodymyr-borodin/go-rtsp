@@ -36,15 +36,15 @@ type tcpConnection struct {
 
 	mediaChannel  map[string]int
 	onRTPPackage  func(pkt *rtp.Packet)
-	onRTCPPackage func(pkt *rtcp.Packet)
+	onRTCPPackage func(pkt rtcp.Packet)
 	onRTPError    func(err error)
 }
 
-func newTcpConnection(address string, onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt *rtcp.Packet), onRTPError func(err error)) *tcpConnection {
+func newTcpConnection(address string, onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt rtcp.Packet), onRTPError func(err error)) *tcpConnection {
 	return newTcpConnectionWithDialer(address, &net.Dialer{}, onRTPPackage, onRTCPPackage, onRTPError)
 }
 
-func newTcpConnectionWithDialer(address string, d dialer, onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt *rtcp.Packet), onRTPError func(err error)) *tcpConnection {
+func newTcpConnectionWithDialer(address string, d dialer, onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt rtcp.Packet), onRTPError func(err error)) *tcpConnection {
 	c := &tcpConnection{
 		address: address,
 		dialer:  d,
@@ -64,7 +64,7 @@ func newTcpConnectionWithDialer(address string, d dialer, onRTPPackage func(pkt 
 	return c
 }
 
-func (c *tcpConnection) WithCallbacks(onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt *rtcp.Packet), onRTPError func(err error)) {
+func (c *tcpConnection) WithCallbacks(onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt rtcp.Packet), onRTPError func(err error)) {
 	c.onRTPPackage = onRTPPackage
 	c.onRTCPPackage = onRTCPPackage
 	c.onRTPError = onRTPError
@@ -263,7 +263,7 @@ func (c *tcpConnection) run() {
 				}
 
 				for _, pkt := range pkts {
-					c.onRTCPPackage(&pkt)
+					c.onRTCPPackage(pkt)
 				}
 			}
 		} else {
