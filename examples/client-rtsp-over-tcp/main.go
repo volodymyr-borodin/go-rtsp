@@ -20,11 +20,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	client, err := rtsp.NewClient(u, rtsp.WithTransport(rtsp.TransportModeTCP))
-	if err != nil {
-		panic(err)
-	}
-
+	client := rtsp.NewClient(u, rtsp.WithTransport(rtsp.TransportModeTCP))
 	defer func() {
 		err = client.Close(context.Background())
 		if err != nil {

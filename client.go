@@ -91,7 +91,7 @@ type Client struct {
 	err         chan error
 }
 
-func NewClient(url *url.URL, opts ...ClientOption) (*Client, error) {
+func NewClient(url *url.URL, opts ...ClientOption) *Client {
 	cfg := ClientConfig{}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -99,7 +99,7 @@ func NewClient(url *url.URL, opts ...ClientOption) (*Client, error) {
 
 	return newClientWithConn(url, func(onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt rtcp.Packet), onRTPError func(err error)) conn {
 		return newTcpConnection(url.Host, onRTPPackage, onRTCPPackage, onRTPError)
-	}, cfg), nil
+	}, cfg)
 }
 
 func newClientWithConn(url *url.URL, connBuilder func(onRTPPackage func(pkt *rtp.Packet), onRTCPPackage func(pkt rtcp.Packet), onRTPError func(err error)) conn, cfg ClientConfig) *Client {
